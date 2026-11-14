@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Web Speech probe</title>
+<body style="white-space: pre-wrap; font-family: monospace"></body>
+<script>
+// Query: host=<label> mode=mic|track lang=<BCP-47>
+// mic   : recognition.start() listens to the default microphone.
+// track : recognition.start(track) is given the sample WAV as a MediaStreamTrack.
+const params = new URLSearchParams(location.search);
+const host = params.get('host') || 'unknown';
+const mode = params.get('mode') || 'mic';
+
+function log(event, detail = '') {
+  const seconds = (performance.now() / 1000).toFixed(1);
+  const line = `${host} ${mode} ${seconds}s ${event} ${detail}`.trim();
+  document.body.append(line + '\n');
+  navigator.sendBeacon('/log', line);
+}
+
+async function sampleTrack() {
+  const context = new AudioContext();
+  await context.resume();
+  const encoded = await (await fetch('/sample.wav')).arrayBuffer();
+  const source = context.createBufferSource();
+  source.buffer = await context.decodeAudioData(encoded);
+  const destination = context.createMediaStreamDestination();
+  source.connect(destination);
+  source.start();
+  return destination.stream.getAudioTracks()[0];
+}
+
+async function main() {
+  log('userAgent', navigator.userAgent);
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) {
+    log('unsupported');
+    return;
+  }
+  const recognition = new Recognition();
+  recognition.lang = params.get('lang') || 'en-US';
+  recognition.continuous = true;
+  recognition.interimResults = false;
+
+  for (const name of ['start', 'audiostart', 'speechstart', 'speechend', 'audioend', 'end']) {
+    recognition.addEventListener(name, () => log(name));
+  }
+  recognition.addEventListener('error', (event) => log('error', `${event.error} ${event.message || ''}`));
+  recognition.addEventListener('result', (event) => {
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const best = event.results[i][0];
+      log('result', `final=${event.results[i].isFinal} confidence=${best.confidence.toFixed(2)} "${best.transcript}"`);
+    }
+  });
+
+  if (mode === 'track') {
+    recognition.start(await sampleTrack());
+  } else {
+    recognition.start();
+  }
+  log('start-called');
+}
+
+main().catch((error) => log('fatal', String(error)));
+</script>

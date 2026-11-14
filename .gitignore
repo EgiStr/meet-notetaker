@@ -1,0 +1,12 @@
+target/
+node_modules/
+dist/
+
+# Rekaman rapat dan model tidak pernah masuk git
+samples/
+models/
+*.wav
+*.mp3
+*.mp4
+*.m4a
+*.bin
