@@ -2061,6 +2061,7 @@ name = "meet-notetaker"
 version = "0.1.0"
 dependencies = [
  "notetaker-core",
+ "serde",
  "tauri",
  "tauri-build",
 ]

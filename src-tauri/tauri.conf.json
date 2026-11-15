@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Meet Notetaker",
-        "width": 960,
-        "height": 720,
+        "width": 1200,
+        "height": 760,
         "minWidth": 480,
         "minHeight": 400
       }

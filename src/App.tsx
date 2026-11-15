@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { AskPanel } from "./AskPanel";
+import { MomPanel } from "./MomPanel";
+import { useMom } from "./notes";
 import { type Segment, type Source, type Status, useRecording } from "./recording";
 
 const SPEAKER: Record<Source, { label: string; className: string }> = {
@@ -7,7 +10,8 @@ const SPEAKER: Record<Source, { label: string; className: string }> = {
 };
 
 export function App() {
-  const { status, segments, error, start, stop } = useRecording();
+  const { status, segments, error, meetingId, start, stop } = useRecording();
+  const { mom, pending } = useMom(meetingId);
   const elapsed = useElapsedSeconds(status === "recording");
 
   return (
@@ -18,7 +22,7 @@ export function App() {
         {status === "recording" && (
           <span className="text-sm text-zinc-600">Merekam mikrofon dan audio sistem. Beri tahu peserta lain.</span>
         )}
-        {status === "stopping" && <span className="text-sm text-zinc-600">Menyelesaikan transkripsi…</span>}
+        {status === "stopping" && <span className="text-sm text-zinc-600">Menyelesaikan transkripsi dan MoM akhir…</span>}
       </header>
 
       {error && (
@@ -27,7 +31,11 @@ export function App() {
         </p>
       )}
 
-      <Transcript segments={segments} status={status} />
+      <div className="grid min-h-0 flex-1 grid-cols-[1fr_1fr_18rem]">
+        <Transcript segments={segments} status={status} />
+        <MomPanel mom={mom} pending={pending} canRetry={status === "idle"} />
+        <AskPanel key={meetingId} enabled={meetingId > 0} />
+      </div>
     </div>
   );
 }
@@ -62,7 +70,7 @@ function Transcript({ segments, status }: { segments: Segment[]; status: Status 
 
   if (segments.length === 0) {
     return (
-      <main className="flex flex-1 items-center justify-center px-5 text-sm text-zinc-500">
+      <main className="flex items-center justify-center border-r border-zinc-200 px-5 text-center text-sm text-zinc-500">
         {status === "idle"
           ? "Tekan Rekam untuk mulai. Transkrip muncul beberapa detik setelah diucapkan."
           : "Menunggu ucapan…"}
@@ -71,10 +79,10 @@ function Transcript({ segments, status }: { segments: Segment[]; status: Status 
   }
 
   return (
-    <main className="flex-1 overflow-y-auto px-5 py-4">
+    <main className="min-h-0 overflow-y-auto border-r border-zinc-200 px-4 py-4">
       <ol className="mx-auto flex max-w-3xl flex-col gap-3">
         {segments.map((segment) => (
-          <li key={`${segment.source}-${segment.start_secs}`} className="grid grid-cols-[3.5rem_5rem_1fr] gap-3 text-sm">
+          <li key={`${segment.source}-${segment.start_secs}`} className="grid grid-cols-[3rem_4rem_1fr] gap-3 text-sm">
             <time className="font-mono tabular-nums text-zinc-500">{formatClock(segment.start_secs)}</time>
             <span className={`font-medium ${SPEAKER[segment.source].className}`}>{SPEAKER[segment.source].label}</span>
             <p className="leading-relaxed">{segment.text}</p>

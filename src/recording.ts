@@ -20,6 +20,8 @@ export function useRecording() {
   const [status, setStatus] = useState<Status>("idle");
   const [segments, setSegments] = useState<Segment[]>([]);
   const [error, setError] = useState<string | null>(null);
+  /** Increases with every recording that starts; 0 means there is no meeting yet. */
+  const [meetingId, setMeetingId] = useState(0);
 
   useEffect(() => {
     const unlisten = listen<SessionEvent>("session-event", ({ payload }) => {
@@ -40,6 +42,7 @@ export function useRecording() {
     try {
       await invoke("start_recording");
       setStatus("recording");
+      setMeetingId((current) => current + 1);
     } catch (reason) {
       setError(String(reason));
     }
@@ -55,7 +58,7 @@ export function useRecording() {
     setStatus("idle");
   }
 
-  return { status, segments, error, start, stop };
+  return { status, segments, error, meetingId, start, stop };
 }
 
 /** The two streams are transcribed independently, so segments can arrive out of order. */
