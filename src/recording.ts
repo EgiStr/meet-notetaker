@@ -9,6 +9,30 @@ export interface Segment {
   start_secs: number;
   end_secs: number;
   text: string;
+  /** Set by the final diarization: 1 for the first voice heard in the system audio, and so on. */
+  speaker: number | null;
+}
+
+/** Names the user gave to speakers, by speaker number. */
+export type SpeakerNames = Record<number, string>;
+
+export function speakerLabel(segment: Segment, names: SpeakerNames): string {
+  if (segment.source === "microphone") return "Saya";
+  if (segment.speaker === null) return "Lainnya";
+  return names[segment.speaker] || `Pembicara ${segment.speaker}`;
+}
+
+/** What a saved meeting brings back besides its transcript. */
+export interface OpenedMeeting {
+  title: string;
+  mom: string;
+  userNotes: string;
+  chat: { question: string; answer: string }[];
+}
+
+interface MeetingView {
+  summary: { title: string };
+  notes: { segments: Segment[]; names: SpeakerNames; mom: string; user_notes: string; chat: OpenedMeeting["chat"] };
 }
 
 type SessionEvent = { kind: "segment"; data: Segment } | { kind: "error"; data: string };
@@ -22,6 +46,9 @@ export function useRecording() {
   const [error, setError] = useState<string | null>(null);
   /** Increases with every recording that starts; 0 means there is no meeting yet. */
   const [meetingId, setMeetingId] = useState(0);
+  const [names, setNames] = useState<SpeakerNames>({});
+  /** Set while the current meeting was loaded from the history, not recorded just now. */
+  const [opened, setOpened] = useState<OpenedMeeting | null>(null);
 
   useEffect(() => {
     const unlisten = listen<SessionEvent>("session-event", ({ payload }) => {
@@ -31,16 +58,23 @@ export function useRecording() {
         setError(payload.data);
       }
     });
+    // After the meeting the core sends the transcript again with final speaker labels.
+    const unlistenLabels = listen<{ kind: string; data: unknown }>("notes-event", ({ payload }) => {
+      if (payload.kind === "transcript") setSegments(payload.data as Segment[]);
+    });
     return () => {
       void unlisten.then((stop) => stop());
+      void unlistenLabels.then((stop) => stop());
     };
   }, []);
 
-  async function start() {
+  async function start(title: string) {
     setError(null);
-    setSegments([]);
     try {
-      await invoke("start_recording");
+      await invoke("start_recording", { title });
+      setSegments([]);
+      setNames({});
+      setOpened(null);
       setStatus("recording");
       setMeetingId((current) => current + 1);
     } catch (reason) {
@@ -58,7 +92,29 @@ export function useRecording() {
     setStatus("idle");
   }
 
-  return { status, segments, error, meetingId, start, stop };
+  async function open(id: number) {
+    setError(null);
+    try {
+      const { summary, notes } = await invoke<MeetingView>("open_meeting", { id });
+      setSegments(notes.segments);
+      setNames(notes.names);
+      setOpened({ title: summary.title, mom: notes.mom, userNotes: notes.user_notes, chat: notes.chat });
+      setMeetingId((current) => current + 1);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function rename(speaker: number, name: string) {
+    try {
+      await invoke("rename_speaker", { speaker, name });
+      setNames((current) => ({ ...current, [speaker]: name.trim() }));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  return { status, segments, error, meetingId, names, opened, start, stop, open, rename };
 }
 
 /** The two streams are transcribed independently, so segments can arrive out of order. */

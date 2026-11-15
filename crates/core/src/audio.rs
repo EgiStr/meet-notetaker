@@ -1,6 +1,8 @@
 //! Sample-level helpers. Everything downstream of capture works on 16 kHz mono f32.
 
-use std::io::Cursor;
+use std::fs::File;
+use std::io::{BufWriter, Cursor, Seek, Write};
+use std::path::Path;
 
 pub const SAMPLE_RATE: u32 = 16_000;
 
@@ -57,19 +59,42 @@ impl Downsampler {
 
 /// Encodes 16 kHz mono samples as a 16-bit PCM WAV file in memory.
 pub fn encode_wav(samples: &[f32]) -> Result<Vec<u8>, hound::Error> {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: SAMPLE_RATE,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
     let mut bytes = Cursor::new(Vec::new());
-    let mut writer = hound::WavWriter::new(&mut bytes, spec)?;
-    for &sample in samples {
-        writer.write_sample((sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16)?;
-    }
+    let mut writer = hound::WavWriter::new(&mut bytes, WAV_SPEC)?;
+    write_samples(&mut writer, samples)?;
     writer.finalize()?;
     Ok(bytes.into_inner())
+}
+
+const WAV_SPEC: hound::WavSpec = hound::WavSpec {
+    channels: 1,
+    sample_rate: SAMPLE_RATE,
+    bits_per_sample: 16,
+    sample_format: hound::SampleFormat::Int,
+};
+
+fn write_samples<W: Write + Seek>(writer: &mut hound::WavWriter<W>, samples: &[f32]) -> Result<(), hound::Error> {
+    samples
+        .iter()
+        .try_for_each(|sample| writer.write_sample((sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16))
+}
+
+/// Writes one stream of a meeting to a 16 kHz mono WAV file as it is captured.
+pub struct WavRecorder(hound::WavWriter<BufWriter<File>>);
+
+impl WavRecorder {
+    pub fn create(path: &Path) -> Result<Self, hound::Error> {
+        hound::WavWriter::create(path, WAV_SPEC).map(Self)
+    }
+
+    pub fn write(&mut self, samples: &[f32]) -> Result<(), hound::Error> {
+        write_samples(&mut self.0, samples)
+    }
+
+    /// Completes the file header; without this the file is unreadable.
+    pub fn finish(self) -> Result<(), hound::Error> {
+        self.0.finalize()
+    }
 }
 
 #[cfg(test)]

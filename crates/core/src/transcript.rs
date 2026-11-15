@@ -28,6 +28,10 @@ pub struct TranscriptSegment {
     pub start_secs: f64,
     pub end_secs: f64,
     pub text: String,
+    /// Set by the final diarization for system audio: 1 for the first voice
+    /// heard, 2 for the second, and so on. `None` until then, and always for
+    /// the microphone.
+    pub speaker: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error)]

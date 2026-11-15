@@ -102,6 +102,7 @@ fn parse_segments(body: &str, chunk: &AudioChunk) -> Result<Vec<TranscriptSegmen
             start_secs: chunk.start_secs + segment.start,
             end_secs: chunk.start_secs + segment.end,
             text: segment.text.trim().to_owned(),
+            speaker: None,
         })
         .collect())
 }
@@ -126,6 +127,7 @@ mod tests {
                 start_secs: 100.5,
                 end_secs: 102.0,
                 text: "Selamat pagi.".into(),
+                speaker: None,
             }]
         );
     }

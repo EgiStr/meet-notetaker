@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::llm::{LlmClient, LlmError};
 use crate::prompts;
+use crate::speakers::{assign_speakers, replace_label, SpeakerNames, SpeakerTurn};
 use crate::transcript::TranscriptSegment;
 
 pub struct MeetingNotes {
@@ -15,19 +16,63 @@ pub struct MeetingNotes {
     state: Mutex<State>,
 }
 
+/// Everything worth keeping of one meeting; what is saved and loaded.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct NotesSnapshot {
+    /// In chronological order.
+    pub segments: Vec<TranscriptSegment>,
+    pub mom: String,
+    pub user_notes: String,
+    pub names: SpeakerNames,
+    pub chat: Vec<Exchange>,
+}
+
+/// One question asked about the meeting and its answer.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Exchange {
+    pub question: String,
+    pub answer: String,
+}
+
 #[derive(Default)]
 struct State {
+    chat: Vec<Exchange>,
     /// In arrival order, which is not always chronological across the two streams.
     segments: Vec<TranscriptSegment>,
     /// How many of `segments` the current minutes already cover.
     summarized: usize,
     mom: String,
     user_notes: String,
+    names: SpeakerNames,
 }
 
 impl MeetingNotes {
     pub fn new(llm: Arc<dyn LlmClient>) -> Self {
         Self { llm, state: Mutex::default() }
+    }
+
+    /// Continues a saved meeting. Its minutes are taken to cover the whole transcript.
+    pub fn restore(llm: Arc<dyn LlmClient>, snapshot: NotesSnapshot) -> Self {
+        let state = State {
+            summarized: snapshot.segments.len(),
+            segments: snapshot.segments,
+            mom: snapshot.mom,
+            user_notes: snapshot.user_notes,
+            names: snapshot.names,
+            chat: snapshot.chat,
+        };
+        Self { llm, state: Mutex::new(state) }
+    }
+
+    pub fn snapshot(&self) -> NotesSnapshot {
+        let state = self.state();
+        NotesSnapshot {
+            segments: chronological(&state.segments),
+            mom: state.mom.clone(),
+            user_notes: state.user_notes.clone(),
+            names: state.names.clone(),
+            chat: state.chat.clone(),
+        }
     }
 
     pub fn add_segment(&self, segment: TranscriptSegment) {
@@ -36,6 +81,27 @@ impl MeetingNotes {
 
     pub fn set_user_notes(&self, notes: String) {
         self.state().user_notes = notes;
+    }
+
+    /// The transcript so far, in chronological order.
+    pub fn transcript(&self) -> Vec<TranscriptSegment> {
+        chronological(&self.state().segments)
+    }
+
+    /// Labels the system-audio segments with the speakers found by diarization.
+    pub fn apply_speaker_turns(&self, turns: &[SpeakerTurn]) {
+        assign_speakers(&mut self.state().segments, turns);
+    }
+
+    /// Gives a speaker a name, in the transcript sent to the LLM from now on
+    /// and in the minutes already written. Returns the minutes.
+    pub fn rename_speaker(&self, speaker: u32, name: &str) -> String {
+        let mut state = self.state();
+        let old = state.names.name(speaker);
+        state.names.rename(speaker, name);
+        let new = state.names.name(speaker);
+        state.mom = replace_label(&state.mom, &old, &new);
+        state.mom.clone()
     }
 
     /// Brings the minutes up to date with the transcript added since the last
@@ -48,7 +114,10 @@ impl MeetingNotes {
                 return Ok(None);
             }
             let new_segments = chronological(&state.segments[state.summarized..]);
-            (prompts::incremental_mom(&state.mom, &state.user_notes, &new_segments), state.segments.len())
+            (
+                prompts::incremental_mom(&state.mom, &state.user_notes, &new_segments, &state.names),
+                state.segments.len(),
+            )
         };
         Ok(Some(self.store_mom(self.llm.complete(&prompt)?, covered)))
     }
@@ -60,7 +129,10 @@ impl MeetingNotes {
             if state.segments.is_empty() {
                 return Ok(None);
             }
-            (prompts::final_mom(&state.user_notes, &chronological(&state.segments)), state.segments.len())
+            (
+                prompts::final_mom(&state.user_notes, &chronological(&state.segments), &state.names),
+                state.segments.len(),
+            )
         };
         Ok(Some(self.store_mom(self.llm.complete(&prompt)?, covered)))
     }
@@ -68,9 +140,11 @@ impl MeetingNotes {
     pub fn answer(&self, question: &str) -> Result<String, LlmError> {
         let prompt = {
             let state = self.state();
-            prompts::answer(question, &state.mom, &chronological(&state.segments))
+            prompts::answer(question, &state.mom, &chronological(&state.segments), &state.names)
         };
-        self.llm.complete(&prompt)
+        let answer = self.llm.complete(&prompt)?;
+        self.state().chat.push(Exchange { question: question.trim().to_owned(), answer: answer.clone() });
+        Ok(answer)
     }
 
     fn store_mom(&self, mom: String, covered: usize) -> String {
@@ -162,7 +236,13 @@ mod tests {
     }
 
     fn segment(start_secs: f64, text: &str) -> TranscriptSegment {
-        TranscriptSegment { source: Source::System, start_secs, end_secs: start_secs + 1.0, text: text.into() }
+        TranscriptSegment {
+            source: Source::System,
+            start_secs,
+            end_secs: start_secs + 1.0,
+            text: text.into(),
+            speaker: None,
+        }
     }
 
     fn notes_with(llm: &Arc<FakeLlm>) -> MeetingNotes {
@@ -263,6 +343,50 @@ mod tests {
         assert!(question.contains("mom 1"));
         assert!(question.contains("tenggat Jumat"));
         assert!(question.ends_with("Pertanyaan: Kapan tenggatnya?"));
+    }
+
+    #[test]
+    fn speaker_turns_and_names_reach_the_transcript_sent_to_the_llm() {
+        let llm = Arc::new(FakeLlm::default());
+        let notes = notes_with(&llm);
+        notes.add_segment(segment(0.0, "halo"));
+        notes.apply_speaker_turns(&[SpeakerTurn { start_secs: 0.0, end_secs: 1.0, speaker: 5 }]);
+        assert_eq!(notes.transcript()[0].speaker, Some(1));
+
+        notes.rename_speaker(1, "Budi");
+        notes.rebuild_mom().unwrap();
+        assert!(llm.prompts()[0].user.contains("[00:00] Budi: halo"));
+    }
+
+    #[test]
+    fn renaming_a_speaker_rewrites_the_minutes_already_written() {
+        let llm = Arc::new(FakeLlm::default());
+        let notes = notes_with(&llm);
+        notes.add_segment(segment(0.0, "halo"));
+        notes.update_mom().unwrap();
+        notes.state().mom = "- [Pembicara 1] kirim laporan".into();
+
+        assert_eq!(notes.rename_speaker(1, "Budi"), "- [Budi] kirim laporan");
+        assert_eq!(notes.rename_speaker(1, "Budi Santoso"), "- [Budi Santoso] kirim laporan");
+        assert_eq!(notes.rename_speaker(1, ""), "- [Pembicara 1] kirim laporan");
+    }
+
+    #[test]
+    fn a_restored_meeting_keeps_everything_and_needs_no_update() {
+        let llm = Arc::new(FakeLlm::default());
+        let notes = notes_with(&llm);
+        notes.add_segment(segment(0.0, "halo"));
+        notes.set_user_notes("catatan".into());
+        notes.update_mom().unwrap();
+        notes.rename_speaker(1, "Budi");
+        notes.answer(" Siapa? ").unwrap();
+
+        let snapshot = notes.snapshot();
+        assert_eq!(snapshot.chat, [Exchange { question: "Siapa?".into(), answer: "mom 2".into() }]);
+
+        let restored = MeetingNotes::restore(llm.clone(), snapshot.clone());
+        assert_eq!(restored.snapshot(), snapshot);
+        assert_eq!(restored.update_mom().unwrap(), None);
     }
 
     #[test]

@@ -8,18 +8,25 @@ interface Exchange {
   failed?: boolean;
 }
 
-/** The user's own notes and on-demand questions about the meeting. */
-export function AskPanel({ enabled }: { enabled: boolean }) {
+interface Props {
+  enabled: boolean;
+  /** What a meeting opened from the history already has. */
+  savedNotes: string;
+  savedChat: Exchange[];
+}
+
+/** The user's own notes and on-demand questions about the meeting. Remount (change `key`) to show another meeting. */
+export function AskPanel({ enabled, savedNotes, savedChat }: Props) {
   return (
     <section className="flex min-h-0 flex-col bg-white">
-      <UserNotes enabled={enabled} />
-      <Questions enabled={enabled} />
+      <UserNotes enabled={enabled} saved={savedNotes} />
+      <Questions enabled={enabled} saved={savedChat} />
     </section>
   );
 }
 
-function UserNotes({ enabled }: { enabled: boolean }) {
-  const [text, setText] = useState("");
+function UserNotes({ enabled, saved }: { enabled: boolean; saved: string }) {
+  const [text, setText] = useState(saved);
   const [error, setError] = useState<string | null>(null);
 
   function change(next: string) {
@@ -46,8 +53,8 @@ function UserNotes({ enabled }: { enabled: boolean }) {
   );
 }
 
-function Questions({ enabled }: { enabled: boolean }) {
-  const [exchanges, setExchanges] = useState<Exchange[]>([]);
+function Questions({ enabled, saved }: { enabled: boolean; saved: Exchange[] }) {
+  const [exchanges, setExchanges] = useState<Exchange[]>(saved);
   const [draft, setDraft] = useState("");
   const waiting = exchanges.some((exchange) => exchange.answer === null);
 

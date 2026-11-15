@@ -2,3 +2,8 @@
 resolver = "2"
 members = ["crates/core", "src-tauri"]
 exclude = ["spikes/stage0"]
+
+# Diarization and audio code in dependencies is unusably slow unoptimized
+# (polyvoice: 0.2x realtime in debug, above 10x optimized).
+[profile.dev.package."*"]
+opt-level = 3

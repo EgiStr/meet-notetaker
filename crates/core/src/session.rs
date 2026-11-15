@@ -1,13 +1,14 @@
 //! One recording session: a capture thread per source feeding a single
 //! transcription worker, which reports segments in the order chunks close.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::audio::{samples_to_seconds, seconds_to_samples, Downsampler};
+use crate::audio::{samples_to_seconds, seconds_to_samples, Downsampler, WavRecorder};
 use crate::capture::{self, CaptureMessage};
 use crate::chunker::{Chunk, Chunker, ChunkerConfig};
 use crate::transcript::{AudioChunk, Source, Transcriber, TranscriptSegment};
@@ -34,7 +35,13 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn start(sources: &[Source], transcriber: Arc<dyn Transcriber>, sink: EventSink) -> Self {
+    /// With `audio_dir`, each stream is also written there as `microphone.wav` or `system.wav`.
+    pub fn start(
+        sources: &[Source],
+        transcriber: Arc<dyn Transcriber>,
+        sink: EventSink,
+        audio_dir: Option<PathBuf>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let (chunks, closed_chunks) = mpsc::channel::<AudioChunk>();
 
@@ -42,7 +49,8 @@ impl Session {
             .iter()
             .map(|&source| {
                 let (stop, chunks, sink) = (stop.clone(), chunks.clone(), sink.clone());
-                thread::spawn(move || run_capture(source, &stop, &chunks, &sink))
+                let recording = audio_dir.as_deref().map(|dir| recording_path(dir, source));
+                thread::spawn(move || run_capture(source, &stop, &chunks, &sink, recording.as_deref()))
             })
             .collect();
 
@@ -69,7 +77,55 @@ impl Session {
     }
 }
 
-fn run_capture(source: Source, stop: &AtomicBool, chunks: &Sender<AudioChunk>, sink: &EventSink) {
+/// Where `Session::start` writes the audio of one stream.
+pub fn recording_path(audio_dir: &Path, source: Source) -> PathBuf {
+    audio_dir.join(match source {
+        Source::Microphone => "microphone.wav",
+        Source::System => "system.wav",
+    })
+}
+
+/// Keeps a copy of the stream on disk. A write failure is reported once and
+/// ends the copy; transcription goes on.
+struct Recording<'a> {
+    recorder: Option<WavRecorder>,
+    source: Source,
+    sink: &'a EventSink,
+}
+
+impl<'a> Recording<'a> {
+    fn open(path: Option<&Path>, source: Source, sink: &'a EventSink) -> Self {
+        let recorder = path.and_then(|path| WavRecorder::create(path).map_err(|error| report(source, sink, error)).ok());
+        Self { recorder, source, sink }
+    }
+
+    fn write(&mut self, samples: &[f32]) {
+        if let Some(recorder) = &mut self.recorder {
+            if let Err(error) = recorder.write(samples) {
+                report(self.source, self.sink, error);
+                self.recorder = None;
+            }
+        }
+    }
+
+    fn finish(self) {
+        if let Some(Err(error)) = self.recorder.map(WavRecorder::finish) {
+            report(self.source, self.sink, error);
+        }
+    }
+}
+
+fn report(source: Source, sink: &EventSink, error: impl std::fmt::Display) {
+    sink(SessionEvent::Error(format!("{source:?}: {error}")));
+}
+
+fn run_capture(
+    source: Source,
+    stop: &AtomicBool,
+    chunks: &Sender<AudioChunk>,
+    sink: &EventSink,
+    recording_path: Option<&Path>,
+) {
     let (messages, incoming) = mpsc::channel();
     let capture = match capture::open(source, messages) {
         Ok(capture) => capture,
@@ -79,6 +135,7 @@ fn run_capture(source: Source, stop: &AtomicBool, chunks: &Sender<AudioChunk>, s
         }
     };
 
+    let mut recording = Recording::open(recording_path, source, sink);
     let started = Instant::now();
     let max_lag = seconds_to_samples(MAX_LAG_SECS) as u64;
     let mut downsampler = Downsampler::new(capture.sample_rate);
@@ -100,13 +157,16 @@ fn run_capture(source: Source, stop: &AtomicBool, chunks: &Sender<AudioChunk>, s
         if lag > max_lag {
             let silence = vec![0.0; lag as usize];
             fed_samples += lag;
+            recording.write(&silence);
             forward(source, chunker.push(&silence), chunks);
         }
         fed_samples += resampled.len() as u64;
+        recording.write(&resampled);
         forward(source, chunker.push(&resampled), chunks);
     }
 
     drop(capture);
+    recording.finish();
     forward(source, chunker.flush().into_iter().collect(), chunks);
 }
 

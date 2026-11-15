@@ -37,8 +37,8 @@ fn minutes_and_answers_come_from_the_transcript() {
         start_secs: index as f64 * 12.0,
         end_secs: index as f64 * 12.0 + 10.0,
         text: (*text).into(),
+        speaker: None,
     });
-
 
     let mut segments = segments.collect::<Vec<_>>();
     let late = segments.split_off(4);

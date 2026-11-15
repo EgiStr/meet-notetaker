@@ -2,16 +2,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
-type NotesEvent = { kind: "mom"; data: string } | { kind: "pending"; data: string };
+/** The "transcript" kind of this event is handled by `useRecording`. */
+type NotesEvent = { kind: "mom"; data: string } | { kind: "pending"; data: string } | { kind: "transcript" };
 
 /** The minutes of the current meeting, and why an update is pending when one failed. */
-export function useMom(meetingId: number) {
+export function useMom(meetingId: number, savedMom: string) {
   const [mom, setMom] = useState("");
   const [pending, setPending] = useState<string | null>(null);
 
   useEffect(() => {
-    setMom("");
+    setMom(savedMom);
     setPending(null);
+    // Only a change of meeting resets the minutes; `savedMom` belongs to that meeting.
   }, [meetingId]);
 
   useEffect(() => {
@@ -19,7 +21,7 @@ export function useMom(meetingId: number) {
       if (payload.kind === "mom") {
         setMom(payload.data);
         setPending(null);
-      } else {
+      } else if (payload.kind === "pending") {
         setPending(payload.data);
       }
     });

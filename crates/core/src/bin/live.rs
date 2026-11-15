@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &[Source::Microphone, Source::System],
         Arc::new(transcriber),
         Arc::new(print_event),
+        None,
     );
     eprintln!("recording for {seconds}s...");
     thread::sleep(Duration::from_secs(seconds));
