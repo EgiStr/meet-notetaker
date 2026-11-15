@@ -11,7 +11,7 @@ const SPEAKER_COLOR: Record<Source, string> = {
 };
 
 export function App() {
-  const { status, segments, error, meetingId, names, opened, start, stop, open, rename } = useRecording();
+  const { status, segments, error, meetingId, names, opened, start, stop, open, rename, importFile } = useRecording();
   const { mom, pending } = useMom(meetingId, opened?.mom ?? "");
   const [title, setTitle] = useState("");
   const [showHistory, setShowHistory] = useState(false);
@@ -19,6 +19,12 @@ export function App() {
   useEffect(() => {
     if (opened) setTitle(opened.title);
   }, [opened]);
+
+  async function importRecording() {
+    setShowHistory(false);
+    const name = await importFile();
+    if (name) setTitle(name);
+  }
 
   async function openFromHistory(id: number) {
     await open(id);
@@ -43,10 +49,20 @@ export function App() {
           <span className="text-sm text-zinc-600">Merekam mikrofon dan audio sistem. Beri tahu peserta lain.</span>
         )}
         {status === "stopping" && <span className="text-sm text-zinc-600">Menyelesaikan transkripsi, label pembicara, dan MoM akhir…</span>}
+        {status === "importing" && (
+          <span className="text-sm text-zinc-600">Mengimpor: transkripsi, label pembicara, lalu MoM…</span>
+        )}
+        <button
+          onClick={() => void importRecording()}
+          disabled={status !== "idle"}
+          className="ml-auto rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
+        >
+          Impor
+        </button>
         <button
           onClick={() => setShowHistory((shown) => !shown)}
           disabled={status !== "idle"}
-          className="ml-auto rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
+          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
         >
           {showHistory ? "Kembali" : "Riwayat"}
         </button>
@@ -77,11 +93,12 @@ export function App() {
 }
 
 function RecordButton(props: { status: Status; onStart: () => void; onStop: () => void }) {
-  if (props.status === "idle") {
+  if (props.status === "idle" || props.status === "importing") {
     return (
       <button
         onClick={props.onStart}
-        className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+        disabled={props.status === "importing"}
+        className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
       >
         Rekam
       </button>
@@ -115,7 +132,7 @@ function Transcript({ segments, status, names, onRename }: TranscriptProps) {
     return (
       <main className="flex items-center justify-center border-r border-zinc-200 px-5 text-center text-sm text-zinc-500">
         {status === "idle"
-          ? "Tekan Rekam untuk mulai. Transkrip muncul beberapa detik setelah diucapkan."
+          ? "Tekan Rekam untuk mulai, atau Impor untuk memproses file rekaman."
           : "Menunggu ucapan…"}
       </main>
     );

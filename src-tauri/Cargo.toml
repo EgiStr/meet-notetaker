@@ -11,7 +11,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# Enables STT_PROVIDER=whisper. Needs cmake and libclang (LLVM) at build time.
+local-whisper = ["notetaker-core/local-whisper"]
+
 [dependencies]
+tauri-plugin-dialog = "2"
 notetaker-core = { path = "../crates/core" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }

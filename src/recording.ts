@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as pickFile } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 
 export type Source = "microphone" | "system";
@@ -37,7 +38,9 @@ interface MeetingView {
 
 type SessionEvent = { kind: "segment"; data: Segment } | { kind: "error"; data: string };
 
-export type Status = "idle" | "recording" | "stopping";
+export type Status = "idle" | "recording" | "stopping" | "importing";
+
+const AUDIO_EXTENSIONS = ["wav", "mp3", "m4a", "aac", "flac", "ogg"];
 
 /** Owns the recording lifecycle and the transcript received from the Rust core. */
 export function useRecording() {
@@ -92,6 +95,25 @@ export function useRecording() {
     setStatus("idle");
   }
 
+  /** Lets the user pick a recording and processes it. Returns its file name, or null if none was picked. */
+  async function importFile(): Promise<string | null> {
+    const path = await pickFile({ multiple: false, filters: [{ name: "Rekaman audio", extensions: AUDIO_EXTENSIONS }] });
+    if (typeof path !== "string") return null;
+    setError(null);
+    setSegments([]);
+    setNames({});
+    setOpened(null);
+    setMeetingId((current) => current + 1);
+    setStatus("importing");
+    try {
+      await invoke("import_recording", { path });
+    } catch (reason) {
+      setError(String(reason));
+    }
+    setStatus("idle");
+    return path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? null;
+  }
+
   async function open(id: number) {
     setError(null);
     try {
@@ -114,7 +136,7 @@ export function useRecording() {
     }
   }
 
-  return { status, segments, error, meetingId, names, opened, start, stop, open, rename };
+  return { status, segments, error, meetingId, names, opened, start, stop, open, rename, importFile };
 }
 
 /** The two streams are transcribed independently, so segments can arrive out of order. */

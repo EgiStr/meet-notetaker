@@ -44,6 +44,8 @@ pub enum TranscribeError {
     Rejected { status: u16, body: String },
     #[error("unexpected response: {0}")]
     Malformed(#[from] serde_json::Error),
+    #[error("local transcription failed: {0}")]
+    Local(String),
 }
 
 pub trait Transcriber: Send + Sync {

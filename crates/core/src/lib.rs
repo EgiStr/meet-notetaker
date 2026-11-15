@@ -5,6 +5,8 @@
 pub mod audio;
 pub mod capture;
 pub mod chunker;
+pub mod deepgram_transcriber;
+pub mod import;
 pub mod llm;
 pub mod notes;
 pub mod openai_llm;
@@ -15,3 +17,5 @@ pub mod session;
 pub mod speakers;
 pub mod store;
 pub mod transcript;
+#[cfg(feature = "local-whisper")]
+pub mod whisper_transcriber;

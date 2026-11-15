@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use notetaker_core::audio::WavRecorder;
+use notetaker_core::deepgram_transcriber::{DeepgramSettings, DeepgramTranscriber};
+use notetaker_core::import::{load_recording, transcribe_recording};
 use notetaker_core::llm::{LlmClient, LlmError, Prompt};
 use notetaker_core::notes::{MeetingNotes, NotesSnapshot, PeriodicMom};
 use notetaker_core::openai_llm::{OpenAiLlm, OpenAiLlmSettings};
@@ -13,7 +16,7 @@ use notetaker_core::polyvoice_diarizer::PolyvoiceDiarizer;
 use notetaker_core::session::{recording_path, EventSink, Session, SessionEvent};
 use notetaker_core::speakers::Diarizer;
 use notetaker_core::store::{MeetingSummary, Store};
-use notetaker_core::transcript::{Source, TranscriptSegment};
+use notetaker_core::transcript::{Source, Transcriber, TranscriptSegment};
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -99,7 +102,7 @@ fn start_recording(title: String, app: AppHandle, meeting: State<Meeting>, db: S
     if state.session.is_some() {
         return Err("Rekaman sudah berjalan.".into());
     }
-    let transcriber = OpenAiTranscriber::new(stt_settings_from_env()?).map_err(|error| error.to_string())?;
+    let transcriber = transcriber_from_env()?;
     let notes = Arc::new(MeetingNotes::new(llm_from_env()));
     let started_at = unix_now()?;
     let audio_dir = new_audio_dir(&app, started_at)?;
@@ -120,7 +123,7 @@ fn start_recording(title: String, app: AppHandle, meeting: State<Meeting>, db: S
     };
     state.session = Some(Session::start(
         &[Source::Microphone, Source::System],
-        Arc::new(transcriber),
+        transcriber,
         sink,
         Some(audio_dir.clone()),
     ));
@@ -176,6 +179,49 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
     })
     .await
     .map_err(|error| error.to_string())
+}
+
+/// Processes a recording file like a meeting that just ended: transcript,
+/// speaker labels, minutes. The result becomes the current meeting.
+#[tauri::command]
+async fn import_recording(path: String, app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
+    if meeting.state().session.is_some() {
+        return Err("Hentikan rekaman sebelum mengimpor file.".into());
+    }
+    let path = PathBuf::from(path);
+    let transcriber = transcriber_from_env()?;
+    let started_at = unix_now()?;
+    let audio_dir = new_audio_dir(&app, started_at)?;
+    let title = path.file_stem().map_or("Rekaman impor".into(), |stem| stem.to_string_lossy().into_owned());
+    let meeting_id = app.state::<Db>().store().create_meeting(&title, started_at).map_err(|error| error.to_string())?;
+    let notes = Arc::new(MeetingNotes::new(llm_from_env()));
+    {
+        let mut state = meeting.state();
+        state.notes = Some(notes.clone());
+        state.meeting_id = Some(meeting_id);
+        state.audio_dir = Some(audio_dir.clone());
+    }
+
+    spawn_blocking(move || {
+        let samples = load_recording(&path).map_err(|error| error.to_string())?;
+        // The diarizer reads the same file a live session would have written.
+        let recording = recording_path(&audio_dir, Source::System);
+        WavRecorder::create(&recording)
+            .and_then(|mut recorder| recorder.write(&samples).and_then(|()| recorder.finish()))
+            .map_err(|error| format!("{}: {error}", recording.display()))?;
+
+        let transcribed = transcribe_recording(&samples, transcriber.as_ref(), &std::thread::sleep, &mut |segment| {
+            notes.add_segment(segment.clone());
+            let _ = app.emit(SESSION_EVENT, &SessionEvent::Segment(segment));
+        });
+        // What was transcribed before a failure is still labelled, summarized and kept.
+        label_speakers(&app, &notes, &PolyvoiceDiarizer, &audio_dir);
+        rebuild_and_emit(&app, &notes);
+        save_meeting(&app);
+        transcribed.map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Runs the final diarization on the system audio. A failure leaves the
@@ -274,15 +320,50 @@ fn open_meeting(id: i64, meeting: State<Meeting>, db: State<Db>) -> Result<Meeti
     Ok(MeetingView { summary, notes })
 }
 
-/// Provider settings come from the environment until the Settings screen exists.
-fn stt_settings_from_env() -> Result<OpenAiSettings, String> {
-    Ok(OpenAiSettings {
-        base_url: env_or("STT_BASE_URL", "https://api.groq.com/openai/v1"),
-        api_key: std::env::var("STT_API_KEY")
-            .map_err(|_| "Variabel lingkungan STT_API_KEY belum diatur.".to_string())?,
-        model: env_or("STT_MODEL", "whisper-large-v3-turbo"),
-        language: env_or("STT_LANGUAGE", "id"),
-    })
+/// Chooses the transcription provider from STT_PROVIDER: "openai" (default,
+/// any OpenAI-compatible endpoint), "deepgram" or "whisper" (offline).
+/// Settings come from the environment until the Settings screen exists.
+fn transcriber_from_env() -> Result<Arc<dyn Transcriber>, String> {
+    let language = env_or("STT_LANGUAGE", "id");
+    let provider = env_or("STT_PROVIDER", "openai");
+    let transcriber: Arc<dyn Transcriber> = match provider.as_str() {
+        "openai" => Arc::new(
+            OpenAiTranscriber::new(OpenAiSettings {
+                base_url: env_or("STT_BASE_URL", "https://api.groq.com/openai/v1"),
+                api_key: required_env("STT_API_KEY")?,
+                model: env_or("STT_MODEL", "whisper-large-v3-turbo"),
+                language,
+            })
+            .map_err(|error| error.to_string())?,
+        ),
+        "deepgram" => Arc::new(
+            DeepgramTranscriber::new(DeepgramSettings {
+                api_key: required_env("DEEPGRAM_API_KEY")?,
+                model: env_or("STT_MODEL", "nova-2"),
+                language,
+            })
+            .map_err(|error| error.to_string())?,
+        ),
+        "whisper" => local_whisper(language)?,
+        other => return Err(format!("STT_PROVIDER \"{other}\" tidak dikenal. Pilihan: openai, deepgram, whisper.")),
+    };
+    Ok(transcriber)
+}
+
+#[cfg(feature = "local-whisper")]
+fn local_whisper(language: String) -> Result<Arc<dyn Transcriber>, String> {
+    use notetaker_core::whisper_transcriber::WhisperTranscriber;
+    let model = PathBuf::from(required_env("WHISPER_MODEL_PATH")?);
+    Ok(Arc::new(WhisperTranscriber::new(&model, language).map_err(|error| error.to_string())?))
+}
+
+#[cfg(not(feature = "local-whisper"))]
+fn local_whisper(_language: String) -> Result<Arc<dyn Transcriber>, String> {
+    Err("Aplikasi ini dibangun tanpa Whisper lokal. Bangun ulang dengan --features local-whisper.".into())
+}
+
+fn required_env(name: &str) -> Result<String, String> {
+    std::env::var(name).map_err(|_| format!("Variabel lingkungan {name} belum diatur."))
 }
 
 /// A missing or unusable LLM must not prevent recording, so it is reported
@@ -316,6 +397,7 @@ fn env_or(name: &str, default: &str) -> String {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(Meeting::default())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -331,6 +413,7 @@ pub fn run() {
             rename_speaker,
             ask,
             list_meetings,
+            import_recording,
             open_meeting
         ])
         .run(tauri::generate_context!())
