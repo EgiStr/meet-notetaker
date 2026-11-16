@@ -1,10 +1,13 @@
 //! Meetings on disk, in one SQLite file.
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::notes::{Exchange, NotesSnapshot};
+use crate::notes::{Bookmark, Exchange, NotesSnapshot};
+use crate::prompts::MomTemplate;
 use crate::speakers::SpeakerNames;
 use crate::transcript::{Source, TranscriptSegment};
 
@@ -36,7 +39,15 @@ CREATE TABLE IF NOT EXISTS chat (
     position   INTEGER NOT NULL,
     question   TEXT NOT NULL,
     answer     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bookmarks (
+    meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    at_secs    REAL NOT NULL,
+    label      TEXT NOT NULL
 );";
+
+/// Columns added after the first release, for databases created before them.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[("meetings", "template", "TEXT NOT NULL DEFAULT 'general'")];
 
 #[derive(Debug, thiserror::Error)]
 #[error("storage failed: {0}")]
@@ -59,10 +70,25 @@ impl Store {
         Self::prepare(Connection::open(path)?)
     }
 
-    fn prepare(connection: Connection) -> Result<Self, StoreError> {
+    pub(crate) fn prepare(connection: Connection) -> Result<Self, StoreError> {
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         connection.execute_batch(SCHEMA)?;
+        for (table, column, definition) in ADDED_COLUMNS {
+            let present: i64 = connection.query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"),
+                [],
+                |row| row.get(0),
+            )?;
+            if present == 0 {
+                connection.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+            }
+        }
         Ok(Self(connection))
+    }
+
+    /// Removes the meeting with everything stored for it. Returns whether it existed.
+    pub fn delete(&self, meeting_id: i64) -> Result<bool, StoreError> {
+        Ok(self.0.execute("DELETE FROM meetings WHERE id = ?1", [meeting_id])? > 0)
     }
 
     pub fn create_meeting(&self, title: &str, started_at: i64) -> Result<i64, StoreError> {
@@ -76,10 +102,10 @@ impl Store {
         let duration_secs = snapshot.segments.iter().map(|segment| segment.end_secs).fold(0.0, f64::max);
         let transaction = self.0.transaction()?;
         transaction.execute(
-            "UPDATE meetings SET duration_secs = ?2, mom = ?3, user_notes = ?4 WHERE id = ?1",
-            params![meeting_id, duration_secs, snapshot.mom, snapshot.user_notes],
+            "UPDATE meetings SET duration_secs = ?2, mom = ?3, user_notes = ?4, template = ?5 WHERE id = ?1",
+            params![meeting_id, duration_secs, snapshot.mom, snapshot.user_notes, snapshot.template.id()],
         )?;
-        for table in ["segments", "speaker_names", "chat"] {
+        for table in ["segments", "speaker_names", "chat", "bookmarks"] {
             transaction.execute(&format!("DELETE FROM {table} WHERE meeting_id = ?1"), [meeting_id])?;
         }
         {
@@ -109,13 +135,19 @@ impl Store {
                     params![meeting_id, position as i64, exchange.question, exchange.answer],
                 )?;
             }
+            for bookmark in &snapshot.bookmarks {
+                transaction.execute(
+                    "INSERT INTO bookmarks (meeting_id, at_secs, label) VALUES (?1, ?2, ?3)",
+                    params![meeting_id, bookmark.at_secs, bookmark.label],
+                )?;
+            }
         }
         Ok(transaction.commit()?)
     }
 
     /// Newest first. A non-blank `query` keeps the meetings whose title or transcript contains it.
     pub fn list(&self, query: &str) -> Result<Vec<MeetingSummary>, StoreError> {
-        let pattern = format!("%{}%", query.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let pattern = like_pattern(query.trim());
         let mut select = self.0.prepare(
             "SELECT id, title, started_at, duration_secs FROM meetings
              WHERE title LIKE ?1 ESCAPE '\\'
@@ -127,16 +159,81 @@ impl Store {
         Ok(summaries)
     }
 
+    /// Newest first, only meetings that have minutes.
+    pub fn recent_moms(&self, limit: usize) -> Result<Vec<(MeetingSummary, String)>, StoreError> {
+        let mut select = self.0.prepare(
+            "SELECT id, title, started_at, duration_secs, mom FROM meetings
+             WHERE mom <> '' ORDER BY started_at DESC, id DESC LIMIT ?1",
+        )?;
+        let moms = select
+            .query_map([limit as i64], |row| Ok((summary_from_row(row)?, row.get::<_, String>(4)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(moms)
+    }
+
+    /// The transcript segments, across all meetings, that contain the most of
+    /// `terms` (lowercase), best first and newest first among equals.
+    pub fn find_segments(&self, terms: &[String], limit: usize) -> Result<Vec<Hit>, StoreError> {
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let patterns: Vec<String> = terms.iter().map(|term| like_pattern(term)).collect();
+        let condition =
+            (1..=patterns.len()).map(|n| format!("s.text LIKE ?{n} ESCAPE '\\'")).collect::<Vec<_>>().join(" OR ");
+        let mut select = self.0.prepare(&format!(
+            "SELECT m.id, m.title, m.started_at, m.duration_secs, s.source, s.start_secs, s.end_secs, s.text, s.speaker
+             FROM segments s JOIN meetings m ON m.id = s.meeting_id WHERE {condition}"
+        ))?;
+        let mut found: Vec<(usize, Hit)> = select
+            .query_map(rusqlite::params_from_iter(&patterns), |row| {
+                let segment = TranscriptSegment {
+                    source: source_from_name(&row.get::<_, String>(4)?),
+                    start_secs: row.get(5)?,
+                    end_secs: row.get(6)?,
+                    text: row.get(7)?,
+                    speaker: row.get(8)?,
+                };
+                Ok((summary_from_row(row)?, segment))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(meeting, segment)| {
+                let text = segment.text.to_lowercase();
+                let score = terms.iter().filter(|term| text.contains(term.as_str())).count();
+                (score, Hit { meeting, segment, speaker: String::new() })
+            })
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.meeting.started_at.cmp(&a.1.meeting.started_at)));
+        found.truncate(limit);
+
+        let mut names: HashMap<i64, SpeakerNames> = HashMap::new();
+        for (_, hit) in &mut found {
+            let meeting_names = match names.entry(hit.meeting.id) {
+                Entry::Occupied(known) => known.into_mut(),
+                Entry::Vacant(slot) => slot.insert(
+                    self.0
+                        .prepare("SELECT speaker, name FROM speaker_names WHERE meeting_id = ?1")?
+                        .query_map([hit.meeting.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<Result<SpeakerNames, _>>()?,
+                ),
+            };
+            hit.speaker = meeting_names.label(&hit.segment);
+        }
+        Ok(found.into_iter().map(|(_, hit)| hit).collect())
+    }
+
     pub fn load(&self, meeting_id: i64) -> Result<Option<(MeetingSummary, NotesSnapshot)>, StoreError> {
         let meeting = self
             .0
             .query_row(
-                "SELECT id, title, started_at, duration_secs, mom, user_notes FROM meetings WHERE id = ?1",
+                "SELECT id, title, started_at, duration_secs, mom, user_notes, template FROM meetings WHERE id = ?1",
                 [meeting_id],
-                |row| Ok((summary_from_row(row)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?)),
+                |row| {
+                    Ok((summary_from_row(row)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))
+                },
             )
             .optional()?;
-        let Some((summary, mom, user_notes)) = meeting else {
+        let Some((summary, mom, user_notes, template)) = meeting else {
             return Ok(None);
         };
 
@@ -167,8 +264,29 @@ impl Store {
             .query_map([meeting_id], |row| Ok(Exchange { question: row.get(0)?, answer: row.get(1)? }))?
             .collect::<Result<_, _>>()?;
 
-        Ok(Some((summary, NotesSnapshot { segments, mom, user_notes, names, chat })))
+        let bookmarks = self
+            .0
+            .prepare("SELECT at_secs, label FROM bookmarks WHERE meeting_id = ?1 ORDER BY at_secs")?
+            .query_map([meeting_id], |row| Ok(Bookmark { at_secs: row.get(0)?, label: row.get(1)? }))?
+            .collect::<Result<_, _>>()?;
+        let template = MomTemplate::from_id(&template).unwrap_or_default();
+
+        Ok(Some((summary, NotesSnapshot { segments, mom, user_notes, names, chat, template, bookmarks })))
     }
+}
+
+/// One transcript segment found by `Store::find_segments`, with the meeting it is from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hit {
+    pub meeting: MeetingSummary,
+    pub segment: TranscriptSegment,
+    /// The label shown for whoever spoke, with the names given in that meeting.
+    pub speaker: String,
+}
+
+/// A LIKE pattern that matches `text` anywhere, with wildcards in `text` taken literally.
+fn like_pattern(text: &str) -> String {
+    format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
 }
 
 fn summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<MeetingSummary> {
@@ -211,6 +329,7 @@ mod tests {
             user_notes: "fokus anggaran".into(),
             names: [(1, "Budi".to_string())].into_iter().collect(),
             chat: vec![Exchange { question: "Siapa?".into(), answer: "Budi.".into() }],
+            ..NotesSnapshot::default()
         }
     }
 
@@ -265,6 +384,52 @@ mod tests {
         let found: Vec<i64> = store.list(" anggaran ").unwrap().iter().map(|meeting| meeting.id).collect();
         assert_eq!(found, [by_text, by_title]);
         assert!(!found.contains(&other));
+    }
+
+    #[test]
+    fn template_and_bookmarks_are_saved_and_a_meeting_can_be_deleted() {
+        let mut store = store();
+        let id = store.create_meeting("Rapat", 1).unwrap();
+        let mut with_extras = snapshot();
+        with_extras.template = MomTemplate::Sales;
+        with_extras.bookmarks = vec![Bookmark { at_secs: 5.0, label: "harga".into() }];
+        store.save(id, &with_extras).unwrap();
+        assert_eq!(store.load(id).unwrap().unwrap().1, with_extras);
+
+        assert!(store.delete(id).unwrap());
+        assert!(store.load(id).unwrap().is_none());
+        assert!(store.find_segments(&["anggaran".into()], 10).unwrap().is_empty());
+        assert!(!store.delete(id).unwrap());
+    }
+
+    #[test]
+    fn found_segments_are_ranked_by_matching_terms_and_carry_speaker_names() {
+        let mut store = store();
+        let old = store.create_meeting("Lama", 100).unwrap();
+        let new = store.create_meeting("Baru", 200).unwrap();
+        let mut both = snapshot();
+        both.segments.push(segment(Source::System, 20.0, "anggaran dan tenggat Jumat", Some(1)));
+        store.save(old, &both).unwrap();
+        store.save(new, &snapshot()).unwrap();
+
+        let hits = store.find_segments(&["anggaran".into(), "tenggat".into()], 10).unwrap();
+        assert_eq!(hits[0].segment.text, "anggaran dan tenggat Jumat");
+        assert_eq!(hits[0].speaker, "Budi");
+        // Equal scores: the newer meeting first.
+        assert_eq!((hits[1].meeting.id, hits[2].meeting.id), (new, old));
+        assert_eq!(store.find_segments(&["anggaran".into()], 1).unwrap().len(), 1);
+        assert!(store.find_segments(&[], 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recent_minutes_skip_meetings_without_any() {
+        let mut store = store();
+        store.create_meeting("Kosong", 300).unwrap();
+        let written = store.create_meeting("Ada", 100).unwrap();
+        store.save(written, &snapshot()).unwrap();
+        let moms = store.recent_moms(5).unwrap();
+        assert_eq!(moms.len(), 1);
+        assert_eq!(moms[0].0.id, written);
     }
 
     #[test]

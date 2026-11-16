@@ -3,16 +3,19 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use notetaker_core::audio::WavRecorder;
 use notetaker_core::deepgram_transcriber::{DeepgramSettings, DeepgramTranscriber};
+use notetaker_core::export;
 use notetaker_core::import::{load_recording, transcribe_recording};
+use notetaker_core::library;
 use notetaker_core::llm::{LlmClient, LlmError, Prompt};
-use notetaker_core::notes::{MeetingNotes, NotesSnapshot, PeriodicMom};
+use notetaker_core::notes::{Bookmark, MeetingNotes, NotesSnapshot, PeriodicMom};
 use notetaker_core::openai_llm::{OpenAiLlm, OpenAiLlmSettings};
 use notetaker_core::openai_transcriber::{OpenAiSettings, OpenAiTranscriber};
 use notetaker_core::polyvoice_diarizer::PolyvoiceDiarizer;
+use notetaker_core::prompts::MomTemplate;
 use notetaker_core::session::{recording_path, EventSink, Session, SessionEvent};
 use notetaker_core::speakers::Diarizer;
 use notetaker_core::store::{MeetingSummary, Store};
@@ -46,6 +49,8 @@ struct MeetingState {
     meeting_id: Option<i64>,
     /// Where the audio of the current meeting is written.
     audio_dir: Option<PathBuf>,
+    /// When the running recording started; bookmarks are placed on its timeline.
+    started: Option<Instant>,
 }
 
 impl Meeting {
@@ -66,6 +71,8 @@ enum NotesEvent {
     Transcript(Vec<TranscriptSegment>),
     /// The minutes could not be updated; the reason is shown as "MoM tertunda".
     Pending(String),
+    /// Questions worth asking the assistant about the meeting so far.
+    Questions(Vec<String>),
 }
 
 fn emit_error(app: &AppHandle, error: impl std::fmt::Display) {
@@ -96,14 +103,31 @@ fn emit_mom(app: &AppHandle, result: Result<String, LlmError>) {
     let _ = app.emit(NOTES_EVENT, &event);
 }
 
+/// A failure is not reported: the suggestions are a convenience, and the minutes already show LLM problems.
+fn emit_questions(app: &AppHandle, notes: &MeetingNotes) {
+    if let Ok(questions) = notes.suggest_questions() {
+        if !questions.is_empty() {
+            let _ = app.emit(NOTES_EVENT, &NotesEvent::Questions(questions));
+        }
+    }
+}
+
 #[tauri::command]
-fn start_recording(title: String, app: AppHandle, meeting: State<Meeting>, db: State<Db>) -> Result<(), String> {
+fn start_recording(
+    title: String,
+    template: Option<String>,
+    app: AppHandle,
+    meeting: State<Meeting>,
+    db: State<Db>,
+) -> Result<(), String> {
     let mut state = meeting.state();
     if state.session.is_some() {
         return Err("Rekaman sudah berjalan.".into());
     }
+    let template = parse_template(template.as_deref().unwrap_or("general"))?;
     let transcriber = transcriber_from_env()?;
     let notes = Arc::new(MeetingNotes::new(llm_from_env()));
+    notes.set_template(template);
     let started_at = unix_now()?;
     let audio_dir = new_audio_dir(&app, started_at)?;
     let title = match title.trim() {
@@ -128,9 +152,15 @@ fn start_recording(title: String, app: AppHandle, meeting: State<Meeting>, db: S
         Some(audio_dir.clone()),
     ));
     state.audio_dir = Some(audio_dir);
+    state.started = Some(Instant::now());
+    let suggesting = notes.clone();
     state.periodic_mom = Some(PeriodicMom::start(notes.clone(), MOM_INTERVAL, move |result| {
+        let updated = result.is_ok();
         emit_mom(&app, result);
         save_meeting(&app);
+        if updated {
+            emit_questions(&app, &suggesting);
+        }
     }));
     state.notes = Some(notes);
     state.meeting_id = Some(meeting_id);
@@ -160,6 +190,7 @@ fn unix_now() -> Result<i64, String> {
 async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
     let (session, periodic_mom, notes, audio_dir) = {
         let mut state = meeting.state();
+        state.started = None;
         (state.session.take(), state.periodic_mom.take(), state.notes.clone(), state.audio_dir.clone())
     };
     spawn_blocking(move || {
@@ -183,45 +214,52 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
 
 /// Processes a recording file like a meeting that just ended: transcript,
 /// speaker labels, minutes. The result becomes the current meeting.
+///
+/// Everything runs on a blocking thread: the providers own blocking HTTP
+/// clients, which must not be created or dropped on the async runtime.
 #[tauri::command]
-async fn import_recording(path: String, app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
-    if meeting.state().session.is_some() {
+async fn import_recording(path: String, app: AppHandle) -> Result<(), String> {
+    spawn_blocking(move || import_blocking(&app, &PathBuf::from(path)))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn import_blocking(app: &AppHandle, path: &Path) -> Result<(), String> {
+    if app.state::<Meeting>().state().session.is_some() {
         return Err("Hentikan rekaman sebelum mengimpor file.".into());
     }
-    let path = PathBuf::from(path);
+    // Decode first, so that an unreadable file leaves no empty meeting behind.
+    let samples = load_recording(path).map_err(|error| error.to_string())?;
     let transcriber = transcriber_from_env()?;
+    let notes = Arc::new(MeetingNotes::new(llm_from_env()));
+
     let started_at = unix_now()?;
-    let audio_dir = new_audio_dir(&app, started_at)?;
+    let audio_dir = new_audio_dir(app, started_at)?;
+    // The diarizer reads the same file a live session would have written.
+    let recording = recording_path(&audio_dir, Source::System);
+    WavRecorder::create(&recording)
+        .and_then(|mut recorder| recorder.write(&samples).and_then(|()| recorder.finish()))
+        .map_err(|error| format!("{}: {error}", recording.display()))?;
+
     let title = path.file_stem().map_or("Rekaman impor".into(), |stem| stem.to_string_lossy().into_owned());
     let meeting_id = app.state::<Db>().store().create_meeting(&title, started_at).map_err(|error| error.to_string())?;
-    let notes = Arc::new(MeetingNotes::new(llm_from_env()));
     {
+        let meeting = app.state::<Meeting>();
         let mut state = meeting.state();
         state.notes = Some(notes.clone());
         state.meeting_id = Some(meeting_id);
         state.audio_dir = Some(audio_dir.clone());
     }
 
-    spawn_blocking(move || {
-        let samples = load_recording(&path).map_err(|error| error.to_string())?;
-        // The diarizer reads the same file a live session would have written.
-        let recording = recording_path(&audio_dir, Source::System);
-        WavRecorder::create(&recording)
-            .and_then(|mut recorder| recorder.write(&samples).and_then(|()| recorder.finish()))
-            .map_err(|error| format!("{}: {error}", recording.display()))?;
-
-        let transcribed = transcribe_recording(&samples, transcriber.as_ref(), &std::thread::sleep, &mut |segment| {
-            notes.add_segment(segment.clone());
-            let _ = app.emit(SESSION_EVENT, &SessionEvent::Segment(segment));
-        });
-        // What was transcribed before a failure is still labelled, summarized and kept.
-        label_speakers(&app, &notes, &PolyvoiceDiarizer, &audio_dir);
-        rebuild_and_emit(&app, &notes);
-        save_meeting(&app);
-        transcribed.map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    let transcribed = transcribe_recording(&samples, transcriber.as_ref(), &std::thread::sleep, &mut |segment| {
+        notes.add_segment(segment.clone());
+        let _ = app.emit(SESSION_EVENT, &SessionEvent::Segment(segment));
+    });
+    // What was transcribed before a failure is still labelled, summarized and kept.
+    label_speakers(app, &notes, &PolyvoiceDiarizer, &audio_dir);
+    rebuild_and_emit(app, &notes);
+    save_meeting(app);
+    transcribed.map_err(|error| error.to_string())
 }
 
 /// Runs the final diarization on the system audio. A failure leaves the
@@ -288,6 +326,143 @@ async fn ask(question: String, app: AppHandle, meeting: State<'_, Meeting>) -> R
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())
+}
+
+fn parse_template(id: &str) -> Result<MomTemplate, String> {
+    MomTemplate::from_id(id).ok_or_else(|| format!("Template \"{id}\" tidak dikenal."))
+}
+
+/// Applies from the next update of the minutes.
+#[tauri::command]
+fn set_template(template: String, app: AppHandle, meeting: State<Meeting>) -> Result<(), String> {
+    meeting.notes()?.set_template(parse_template(&template)?);
+    save_meeting(&app);
+    Ok(())
+}
+
+/// Marks a moment of the meeting. Without `at_secs` it is the moment the running recording has reached.
+#[tauri::command]
+fn add_bookmark(
+    label: String,
+    at_secs: Option<f64>,
+    app: AppHandle,
+    meeting: State<Meeting>,
+) -> Result<Vec<Bookmark>, String> {
+    let (notes, started) = {
+        let state = meeting.state();
+        (state.notes.clone(), state.started)
+    };
+    let notes = notes.ok_or_else(|| "Belum ada rapat.".to_string())?;
+    let at_secs = match (at_secs, started) {
+        (Some(at_secs), _) => at_secs,
+        (None, Some(started)) => started.elapsed().as_secs_f64(),
+        (None, None) => return Err("Penanda hanya bisa dibuat saat merekam, atau dari baris transkrip.".into()),
+    };
+    let bookmarks = notes.add_bookmark(at_secs, &label);
+    save_meeting(&app);
+    Ok(bookmarks)
+}
+
+#[tauri::command]
+fn remove_bookmark(index: usize, app: AppHandle, meeting: State<Meeting>) -> Result<Vec<Bookmark>, String> {
+    let bookmarks = meeting.notes()?.remove_bookmark(index);
+    save_meeting(&app);
+    Ok(bookmarks)
+}
+
+/// The user's short notes written out with the transcript. `None` while there are no notes.
+#[tauri::command]
+async fn expand_notes(meeting: State<'_, Meeting>) -> Result<Option<String>, String> {
+    let notes = meeting.notes()?;
+    spawn_blocking(move || notes.expand_notes())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn suggest_questions(meeting: State<'_, Meeting>) -> Result<Vec<String>, String> {
+    let notes = meeting.notes()?;
+    spawn_blocking(move || notes.suggest_questions())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[derive(serde::Serialize)]
+struct LibraryAnswer {
+    answer: String,
+    sources: Vec<library::Source>,
+}
+
+/// Answers a question from all saved meetings. `utc_offset_secs` is the local time zone, for dates.
+#[tauri::command]
+async fn ask_library(question: String, utc_offset_secs: i64, app: AppHandle) -> Result<LibraryAnswer, String> {
+    spawn_blocking(move || {
+        let prepared = library::prepare(&app.state::<Db>().store(), &question, utc_offset_secs)
+            .map_err(|error| error.to_string())?;
+        let Some(prepared) = prepared else {
+            return Ok(LibraryAnswer { answer: "Belum ada rapat tersimpan yang bisa dicari.".into(), sources: Vec::new() });
+        };
+        let answer = llm_from_env().complete(&prepared.prompt).map_err(|error| error.to_string())?;
+        Ok(LibraryAnswer { answer, sources: prepared.sources })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Writes the current meeting to `path` as Markdown.
+#[tauri::command]
+fn export_meeting(path: String, utc_offset_secs: i64, meeting: State<Meeting>, db: State<Db>) -> Result<(), String> {
+    let (notes, id) = {
+        let state = meeting.state();
+        (state.notes.clone(), state.meeting_id)
+    };
+    let (Some(notes), Some(id)) = (notes, id) else {
+        return Err("Belum ada rapat.".into());
+    };
+    let (summary, _) = db
+        .store()
+        .load(id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Rapat tidak ditemukan.".to_string())?;
+    std::fs::write(&path, export::markdown(&summary, &notes.snapshot(), utc_offset_secs))
+        .map_err(|error| format!("{path}: {error}"))
+}
+
+/// Removes a meeting and its recordings for good. Returns whether it was the current meeting.
+#[tauri::command]
+fn delete_meeting(id: i64, app: AppHandle, meeting: State<Meeting>, db: State<Db>) -> Result<bool, String> {
+    let mut state = meeting.state();
+    let is_current = state.meeting_id == Some(id);
+    if is_current && state.session.is_some() {
+        return Err("Hentikan rekaman sebelum menghapus rapat ini.".into());
+    }
+    let (summary, _) = db
+        .store()
+        .load(id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Rapat tidak ditemukan.".to_string())?;
+
+    let audio_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("recordings")
+        .join(summary.started_at.to_string());
+    match std::fs::remove_dir_all(&audio_dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", audio_dir.display())),
+    }
+    db.store().delete(id).map_err(|error| error.to_string())?;
+
+    if is_current {
+        state.notes = None;
+        state.meeting_id = None;
+        state.audio_dir = None;
+    }
+    Ok(is_current)
 }
 
 /// Newest first; `query` filters by title and transcript text.
@@ -414,7 +589,15 @@ pub fn run() {
             ask,
             list_meetings,
             import_recording,
-            open_meeting
+            open_meeting,
+            set_template,
+            add_bookmark,
+            remove_bookmark,
+            expand_notes,
+            suggest_questions,
+            ask_library,
+            export_meeting,
+            delete_meeting
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the application");

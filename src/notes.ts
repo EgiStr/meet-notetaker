@@ -3,7 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
 /** The "transcript" kind of this event is handled by `useRecording`. */
-type NotesEvent = { kind: "mom"; data: string } | { kind: "pending"; data: string } | { kind: "transcript" };
+type NotesEvent =
+  | { kind: "mom"; data: string }
+  | { kind: "pending"; data: string }
+  | { kind: "questions"; data: string[] }
+  | { kind: "transcript" };
 
 /** The minutes of the current meeting, and why an update is pending when one failed. */
 export function useMom(meetingId: number, savedMom: string) {
@@ -43,4 +47,91 @@ export function setUserNotes(text: string): Promise<void> {
 
 export function ask(question: string): Promise<string> {
   return invoke("ask", { question });
+}
+
+export interface Bookmark {
+  at_secs: number;
+  label: string;
+}
+
+export const TEMPLATES = [
+  { id: "general", label: "Umum" },
+  { id: "standup", label: "Standup" },
+  { id: "one_on_one", label: "1:1" },
+  { id: "sales", label: "Penjualan" },
+  { id: "retro", label: "Retrospektif" },
+] as const;
+
+export function setTemplate(template: string): Promise<void> {
+  return invoke("set_template", { template });
+}
+
+export function addBookmark(label: string, atSecs: number | null): Promise<Bookmark[]> {
+  return invoke("add_bookmark", { label, atSecs });
+}
+
+export function removeBookmark(index: number): Promise<Bookmark[]> {
+  return invoke("remove_bookmark", { index });
+}
+
+/** The user's short notes written out with facts from the transcript; null while there are no notes. */
+export function expandNotes(): Promise<string | null> {
+  return invoke("expand_notes");
+}
+
+export function suggestQuestions(): Promise<string[]> {
+  return invoke("suggest_questions");
+}
+
+export interface LibraryAnswer {
+  answer: string;
+  sources: { meeting_id: number; title: string; started_at: number }[];
+}
+
+export function askLibrary(question: string): Promise<LibraryAnswer> {
+  return invoke("ask_library", { question, utcOffsetSecs: -new Date().getTimezoneOffset() * 60 });
+}
+
+/** Writes the current meeting to `path` as Markdown. */
+export function exportMeeting(path: string): Promise<void> {
+  return invoke("export_meeting", { path, utcOffsetSecs: -new Date().getTimezoneOffset() * 60 });
+}
+
+/** Returns whether the deleted meeting was the current one. */
+export function deleteMeeting(id: number): Promise<boolean> {
+  return invoke("delete_meeting", { id });
+}
+
+/** Questions worth asking about the meeting; the core sends new ones after every update of the minutes. */
+export function useQuestions(meetingId: number) {
+  const [questions, setQuestions] = useState<string[]>([]);
+
+  useEffect(() => setQuestions([]), [meetingId]);
+
+  useEffect(() => {
+    const unlisten = listen<NotesEvent>("notes-event", ({ payload }) => {
+      if (payload.kind === "questions") setQuestions(payload.data);
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  return { questions, setQuestions };
+}
+
+/** The bookmarks of the current meeting. Changes go through the core, which keeps them in time order. */
+export function useBookmarks(meetingId: number, saved: Bookmark[]) {
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+
+  useEffect(() => {
+    setBookmarks(saved);
+    // Only a change of meeting resets the list; `saved` belongs to that meeting.
+  }, [meetingId]);
+
+  return {
+    bookmarks,
+    add: (label: string, atSecs: number | null) => addBookmark(label, atSecs).then(setBookmarks),
+    remove: (index: number) => removeBookmark(index).then(setBookmarks),
+  };
 }

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as pickFile } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
+import type { Bookmark } from "./notes";
 
 export type Source = "microphone" | "system";
 
@@ -29,11 +30,21 @@ export interface OpenedMeeting {
   mom: string;
   userNotes: string;
   chat: { question: string; answer: string }[];
+  template: string;
+  bookmarks: Bookmark[];
 }
 
 interface MeetingView {
   summary: { title: string };
-  notes: { segments: Segment[]; names: SpeakerNames; mom: string; user_notes: string; chat: OpenedMeeting["chat"] };
+  notes: {
+    segments: Segment[];
+    names: SpeakerNames;
+    mom: string;
+    user_notes: string;
+    chat: OpenedMeeting["chat"];
+    template: string;
+    bookmarks: Bookmark[];
+  };
 }
 
 type SessionEvent = { kind: "segment"; data: Segment } | { kind: "error"; data: string };
@@ -71,10 +82,10 @@ export function useRecording() {
     };
   }, []);
 
-  async function start(title: string) {
+  async function start(title: string, template: string) {
     setError(null);
     try {
-      await invoke("start_recording", { title });
+      await invoke("start_recording", { title, template });
       setSegments([]);
       setNames({});
       setOpened(null);
@@ -120,11 +131,26 @@ export function useRecording() {
       const { summary, notes } = await invoke<MeetingView>("open_meeting", { id });
       setSegments(notes.segments);
       setNames(notes.names);
-      setOpened({ title: summary.title, mom: notes.mom, userNotes: notes.user_notes, chat: notes.chat });
+      setOpened({
+        title: summary.title,
+        mom: notes.mom,
+        userNotes: notes.user_notes,
+        chat: notes.chat,
+        template: notes.template,
+        bookmarks: notes.bookmarks,
+      });
       setMeetingId((current) => current + 1);
     } catch (reason) {
       setError(String(reason));
     }
+  }
+
+  /** Back to the empty screen, after the current meeting was deleted. */
+  function clear() {
+    setSegments([]);
+    setNames({});
+    setOpened(null);
+    setMeetingId(0);
   }
 
   async function rename(speaker: number, name: string) {
@@ -136,7 +162,7 @@ export function useRecording() {
     }
   }
 
-  return { status, segments, error, meetingId, names, opened, start, stop, open, rename, importFile };
+  return { status, segments, error, meetingId, names, opened, start, stop, open, rename, importFile, clear };
 }
 
 /** The two streams are transcribed independently, so segments can arrive out of order. */
@@ -144,4 +170,12 @@ export function insertByStart(segments: Segment[], incoming: Segment): Segment[]
   const index = segments.findIndex((segment) => segment.start_secs > incoming.start_secs);
   if (index === -1) return [...segments, incoming];
   return [...segments.slice(0, index), incoming, ...segments.slice(index)];
+}
+
+/** `mm:ss` for a number of seconds. */
+export function formatClock(totalSeconds: number) {
+  const whole = Math.floor(totalSeconds);
+  const minutes = String(Math.floor(whole / 60)).padStart(2, "0");
+  const seconds = String(whole % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
 }

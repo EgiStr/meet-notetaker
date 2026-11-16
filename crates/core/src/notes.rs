@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::llm::{LlmClient, LlmError};
-use crate::prompts;
+use crate::prompts::{self, MomTemplate};
 use crate::speakers::{assign_speakers, replace_label, SpeakerNames, SpeakerTurn};
 use crate::transcript::TranscriptSegment;
 
@@ -25,6 +25,15 @@ pub struct NotesSnapshot {
     pub user_notes: String,
     pub names: SpeakerNames,
     pub chat: Vec<Exchange>,
+    pub template: MomTemplate,
+    pub bookmarks: Vec<Bookmark>,
+}
+
+/// A moment of the meeting the user marked to find again.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Bookmark {
+    pub at_secs: f64,
+    pub label: String,
 }
 
 /// One question asked about the meeting and its answer.
@@ -44,6 +53,8 @@ struct State {
     mom: String,
     user_notes: String,
     names: SpeakerNames,
+    template: MomTemplate,
+    bookmarks: Vec<Bookmark>,
 }
 
 impl MeetingNotes {
@@ -60,6 +71,8 @@ impl MeetingNotes {
             user_notes: snapshot.user_notes,
             names: snapshot.names,
             chat: snapshot.chat,
+            template: snapshot.template,
+            bookmarks: snapshot.bookmarks,
         };
         Self { llm, state: Mutex::new(state) }
     }
@@ -72,7 +85,35 @@ impl MeetingNotes {
             user_notes: state.user_notes.clone(),
             names: state.names.clone(),
             chat: state.chat.clone(),
+            template: state.template,
+            bookmarks: state.bookmarks.clone(),
         }
+    }
+
+    /// Sets the shape of the minutes. It applies from the next update or rebuild.
+    pub fn set_template(&self, template: MomTemplate) {
+        self.state().template = template;
+    }
+
+    /// Keeps the bookmarks in chronological order. Returns all of them.
+    pub fn add_bookmark(&self, at_secs: f64, label: &str) -> Vec<Bookmark> {
+        let mut state = self.state();
+        let label = match label.trim() {
+            "" => "Penanda",
+            trimmed => trimmed,
+        };
+        state.bookmarks.push(Bookmark { at_secs: at_secs.max(0.0), label: label.chars().take(120).collect() });
+        state.bookmarks.sort_by(|a, b| a.at_secs.total_cmp(&b.at_secs));
+        state.bookmarks.clone()
+    }
+
+    /// `index` counts in the order returned by `add_bookmark`; an unknown index changes nothing.
+    pub fn remove_bookmark(&self, index: usize) -> Vec<Bookmark> {
+        let mut state = self.state();
+        if index < state.bookmarks.len() {
+            state.bookmarks.remove(index);
+        }
+        state.bookmarks.clone()
     }
 
     pub fn add_segment(&self, segment: TranscriptSegment) {
@@ -115,7 +156,7 @@ impl MeetingNotes {
             }
             let new_segments = chronological(&state.segments[state.summarized..]);
             (
-                prompts::incremental_mom(&state.mom, &state.user_notes, &new_segments, &state.names),
+                prompts::incremental_mom(state.template, &state.mom, &state.user_notes, &new_segments, &state.names),
                 state.segments.len(),
             )
         };
@@ -130,11 +171,36 @@ impl MeetingNotes {
                 return Ok(None);
             }
             (
-                prompts::final_mom(&state.user_notes, &chronological(&state.segments), &state.names),
+                prompts::final_mom(state.template, &state.user_notes, &chronological(&state.segments), &state.names),
                 state.segments.len(),
             )
         };
         Ok(Some(self.store_mom(self.llm.complete(&prompt)?, covered)))
+    }
+
+    /// The user's short notes written out with facts from the transcript.
+    /// `None` when the user has not written any notes. The notes themselves are not changed.
+    pub fn expand_notes(&self) -> Result<Option<String>, LlmError> {
+        let prompt = {
+            let state = self.state();
+            if state.user_notes.trim().is_empty() {
+                return Ok(None);
+            }
+            prompts::expand_notes(&state.user_notes, &state.mom, &chronological(&state.segments), &state.names)
+        };
+        Ok(Some(self.llm.complete(&prompt)?))
+    }
+
+    /// Questions worth asking the assistant about the meeting so far; empty before anyone spoke.
+    pub fn suggest_questions(&self) -> Result<Vec<String>, LlmError> {
+        let prompt = {
+            let state = self.state();
+            if state.segments.is_empty() {
+                return Ok(Vec::new());
+            }
+            prompts::suggest_questions(&state.mom, &chronological(&state.segments), &state.names)
+        };
+        Ok(prompts::parse_questions(&self.llm.complete(&prompt)?))
     }
 
     pub fn answer(&self, question: &str) -> Result<String, LlmError> {
@@ -387,6 +453,52 @@ mod tests {
         let restored = MeetingNotes::restore(llm.clone(), snapshot.clone());
         assert_eq!(restored.snapshot(), snapshot);
         assert_eq!(restored.update_mom().unwrap(), None);
+    }
+
+    #[test]
+    fn the_template_shapes_the_minutes_and_is_kept_in_the_snapshot() {
+        let llm = Arc::new(FakeLlm::default());
+        let notes = notes_with(&llm);
+        notes.set_template(MomTemplate::Standup);
+        notes.add_segment(segment(0.0, "halo"));
+        notes.update_mom().unwrap();
+        assert!(llm.prompts()[0].system.contains("## Hambatan"));
+        assert_eq!(MeetingNotes::restore(llm, notes.snapshot()).snapshot().template, MomTemplate::Standup);
+    }
+
+    #[test]
+    fn bookmarks_stay_in_time_order_and_can_be_removed() {
+        let notes = notes_with(&Arc::new(FakeLlm::default()));
+        notes.add_bookmark(30.0, "  keputusan  ");
+        let marks = notes.add_bookmark(5.0, "");
+        assert_eq!(marks[0], Bookmark { at_secs: 5.0, label: "Penanda".into() });
+        assert_eq!(marks[1].label, "keputusan");
+
+        assert_eq!(notes.remove_bookmark(9).len(), 2);
+        assert_eq!(notes.remove_bookmark(0), [Bookmark { at_secs: 30.0, label: "keputusan".into() }]);
+        assert_eq!(notes.snapshot().bookmarks.len(), 1);
+    }
+
+    #[test]
+    fn expanding_needs_notes_and_leaves_them_unchanged() {
+        let llm = Arc::new(FakeLlm::default());
+        let notes = notes_with(&llm);
+        notes.add_segment(segment(0.0, "tenggat Jumat"));
+        assert_eq!(notes.expand_notes().unwrap(), None);
+        assert!(llm.prompts().is_empty());
+
+        notes.set_user_notes("tenggat?".into());
+        assert_eq!(notes.expand_notes().unwrap().as_deref(), Some("mom 1"));
+        assert!(llm.prompts()[0].user.contains("tenggat Jumat"));
+        assert_eq!(notes.snapshot().user_notes, "tenggat?");
+    }
+
+    #[test]
+    fn suggestions_wait_for_speech() {
+        let llm = Arc::new(FakeLlm::default());
+        let notes = notes_with(&llm);
+        assert!(notes.suggest_questions().unwrap().is_empty());
+        assert!(llm.prompts().is_empty());
     }
 
     #[test]

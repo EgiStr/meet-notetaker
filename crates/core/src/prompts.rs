@@ -5,16 +5,63 @@ use crate::llm::Prompt;
 use crate::speakers::SpeakerNames;
 use crate::transcript::TranscriptSegment;
 
-const MOM_SYSTEM: &str = "\
-Anda notulis rapat. Tulis notulen (MoM) dalam bahasa Indonesia, berformat Markdown, \
-dengan tepat lima bagian berikut dan urutan ini:
+/// The shape of the minutes. Each template is a list of sections; the rules
+/// that keep the minutes faithful to the transcript are the same for all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MomTemplate {
+    #[default]
+    General,
+    Standup,
+    OneOnOne,
+    Sales,
+    Retro,
+}
 
-## Ringkasan
-## Topik
-## Keputusan
-## Action Items
-## Pertanyaan Terbuka
+impl MomTemplate {
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "general" => Self::General,
+            "standup" => Self::Standup,
+            "one_on_one" => Self::OneOnOne,
+            "sales" => Self::Sales,
+            "retro" => Self::Retro,
+            _ => return None,
+        })
+    }
 
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Standup => "standup",
+            Self::OneOnOne => "one_on_one",
+            Self::Sales => "sales",
+            Self::Retro => "retro",
+        }
+    }
+
+    fn sections(self) -> &'static [&'static str] {
+        match self {
+            Self::General => &["Ringkasan", "Topik", "Keputusan", "Action Items", "Pertanyaan Terbuka"],
+            Self::Standup => &["Kemarin", "Hari Ini", "Hambatan", "Action Items"],
+            Self::OneOnOne => &["Ringkasan", "Kabar dan Masukan", "Tujuan dan Pengembangan", "Action Items"],
+            Self::Sales => &["Ringkasan", "Kebutuhan Pelanggan", "Keberatan", "Langkah Berikutnya", "Action Items"],
+            Self::Retro => &["Berjalan Baik", "Perlu Diperbaiki", "Pembelajaran", "Action Items"],
+        }
+    }
+
+    fn system_prompt(self) -> String {
+        let sections = self.sections();
+        let headings: String = sections.iter().map(|section| format!("## {section}\n")).collect();
+        format!(
+            "Anda notulis rapat. Tulis notulen (MoM) dalam bahasa Indonesia, berformat Markdown, \
+dengan tepat {} bagian berikut dan urutan ini:\n\n{headings}\n{MOM_RULES}",
+            sections.len()
+        )
+    }
+}
+
+const MOM_RULES: &str = "\
 Aturan:
 - Hanya tulis hal yang didukung transkrip. Jangan mengarang nama, angka, atau tenggat.
 - Isi tiap bagian berupa butir yang diawali \"- \". Bagian tanpa isi ditulis \"- (belum ada)\".
@@ -29,12 +76,14 @@ const ANSWER_SYSTEM: &str = "\
 Anda membantu pengguna memahami rapat yang sedang diikutinya. Jawab dalam bahasa Indonesia, \
 singkat dan langsung, hanya berdasarkan transkrip dan MoM yang diberikan. Jika jawabannya \
 tidak ada di sana, katakan bahwa hal itu belum dibahas. Transkrip berasal dari pengenalan \
-suara dan bisa salah dengar. \"Saya\" adalah pengguna; label lain adalah peserta lain.";
+suara dan bisa salah dengar. \"Saya\" adalah pengguna; label lain adalah peserta lain. Tulis teks \
+biasa tanpa format Markdown (tanpa tanda * atau #); untuk daftar, awali tiap butir dengan \"- \".";
 
 const NONE: &str = "(belum ada)";
 
 /// Asks for the minutes to be brought up to date with the transcript added since they were written.
 pub fn incremental_mom(
+    template: MomTemplate,
     current_mom: &str,
     user_notes: &str,
     new_segments: &[TranscriptSegment],
@@ -48,18 +97,18 @@ pub fn incremental_mom(
         or_none(user_notes),
         format_transcript(new_segments, names),
     );
-    Prompt { system: MOM_SYSTEM.into(), user }
+    Prompt { system: template.system_prompt(), user }
 }
 
 /// Asks for the minutes to be written from scratch from the whole meeting.
-pub fn final_mom(user_notes: &str, segments: &[TranscriptSegment], names: &SpeakerNames) -> Prompt {
+pub fn final_mom(template: MomTemplate, user_notes: &str, segments: &[TranscriptSegment], names: &SpeakerNames) -> Prompt {
     let user = format!(
         "Catatan saya:\n{}\n\nTranskrip lengkap rapat:\n{}\n\nRapat sudah selesai. Susun MoM akhir \
          dari seluruh transkrip.",
         or_none(user_notes),
         format_transcript(segments, names),
     );
-    Prompt { system: MOM_SYSTEM.into(), user }
+    Prompt { system: template.system_prompt(), user }
 }
 
 pub fn answer(question: &str, mom: &str, segments: &[TranscriptSegment], names: &SpeakerNames) -> Prompt {
@@ -70,6 +119,77 @@ pub fn answer(question: &str, mom: &str, segments: &[TranscriptSegment], names: 
         question.trim(),
     );
     Prompt { system: ANSWER_SYSTEM.into(), user }
+}
+
+const EXPAND_SYSTEM: &str = "\
+Anda membantu pengguna merapikan catatan singkatnya dari sebuah rapat. Ubah catatan itu menjadi \
+catatan yang lengkap dalam bahasa Indonesia: tiap butir catatan dijabarkan dengan fakta dari \
+transkrip (siapa, apa, angka, tenggat) yang berkaitan dengannya. Pertahankan urutan dan maksud \
+catatan, dan jangan menambah hal yang tidak ada di transkrip. Transkrip berasal dari pengenalan \
+suara dan bisa salah dengar. \"Saya\" adalah pengguna; label lain adalah peserta lain. Tulis teks \
+biasa tanpa format Markdown (tanpa tanda * atau #); awali tiap butir dengan \"- \". Keluarkan \
+hanya catatan yang sudah diperluas, tanpa kalimat pembuka atau penutup.";
+
+const SUGGEST_SYSTEM: &str = "\
+Anda membantu pengguna yang sedang mengikuti rapat. Usulkan 3 sampai 5 pertanyaan singkat dalam \
+bahasa Indonesia yang berguna ditanyakan kepada asisten AI tentang rapat ini sampai sekarang, \
+misalnya meminta ringkasan, siapa memegang tugas tertentu, apa yang belum diputuskan, atau apa \
+risikonya. Pertanyaan harus bisa dijawab dari transkrip dan khusus untuk isi rapat ini, bukan \
+pertanyaan umum. Tulis satu pertanyaan per baris, diawali \"- \". Keluarkan hanya daftar itu.";
+
+/// How many of the latest transcript lines the question suggestions are based on.
+const SUGGEST_TRANSCRIPT_LINES: usize = 60;
+
+/// Asks for the user's short notes to be written out with facts from the transcript.
+pub fn expand_notes(user_notes: &str, mom: &str, segments: &[TranscriptSegment], names: &SpeakerNames) -> Prompt {
+    let user = format!(
+        "Catatan singkat saya:
+{}
+
+MoM saat ini:
+{}
+
+Transkrip rapat sejauh ini:
+{}
+
+         Perluas catatan singkat saya.",
+        or_none(user_notes),
+        or_none(mom),
+        format_transcript(segments, names),
+    );
+    Prompt { system: EXPAND_SYSTEM.into(), user }
+}
+
+/// Asks for questions worth putting to the assistant, from the minutes and the latest transcript.
+pub fn suggest_questions(mom: &str, segments: &[TranscriptSegment], names: &SpeakerNames) -> Prompt {
+    let latest = &segments[segments.len().saturating_sub(SUGGEST_TRANSCRIPT_LINES)..];
+    let user = format!(
+        "MoM saat ini:
+{}
+
+Transkrip terbaru:
+{}
+
+Usulkan pertanyaan.",
+        or_none(mom),
+        format_transcript(latest, names),
+    );
+    Prompt { system: SUGGEST_SYSTEM.into(), user }
+}
+
+/// The questions in an LLM reply that lists one per line, with or without a bullet or number.
+pub fn parse_questions(reply: &str) -> Vec<String> {
+    reply
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '-' | '*' | '.' | ')') || c.is_whitespace())
+                .trim()
+        })
+        .filter(|question| question.ends_with('?'))
+        .map(str::to_owned)
+        .take(5)
+        .collect()
 }
 
 /// One line per segment: `[mm:ss] Saya: text`.
@@ -138,6 +258,7 @@ mod tests {
     #[test]
     fn incremental_prompt_contains_current_mom_notes_and_new_transcript() {
         let prompt = incremental_mom(
+            MomTemplate::General,
             "## Ringkasan\n- Rapat anggaran",
             "fokus ke tenggat",
             &[segment(Source::System, 0.0, "Tenggatnya Jumat.")],
@@ -151,13 +272,13 @@ mod tests {
 
     #[test]
     fn first_incremental_prompt_marks_missing_mom_and_notes() {
-        let prompt = incremental_mom("", "  ", &[segment(Source::System, 0.0, "Halo.")], &no_names());
+        let prompt = incremental_mom(MomTemplate::General, "", "  ", &[segment(Source::System, 0.0, "Halo.")], &no_names());
         assert!(prompt.user.starts_with("MoM saat ini:\n(belum ada)\n\nCatatan saya:\n(belum ada)"));
     }
 
     #[test]
     fn final_prompt_asks_for_minutes_of_the_whole_meeting() {
-        let prompt = final_mom("", &[segment(Source::Microphone, 61.0, "Setuju.")], &no_names());
+        let prompt = final_mom(MomTemplate::General, "", &[segment(Source::Microphone, 61.0, "Setuju.")], &no_names());
         assert!(prompt.user.contains("Transkrip lengkap rapat:\n[01:01] Saya: Setuju."));
         assert!(!prompt.user.contains("MoM saat ini"));
     }
@@ -169,5 +290,53 @@ mod tests {
         assert!(prompt.user.ends_with("Pertanyaan: Kapan tenggatnya?"));
         assert!(prompt.user.contains("## Ringkasan\n- X"));
         assert!(prompt.user.contains("[00:00] Lainnya: Jumat."));
+    }
+
+    #[test]
+    fn each_template_asks_for_its_own_sections() {
+        let standup = MomTemplate::Standup.system_prompt();
+        assert!(standup.contains("## Hambatan") && !standup.contains("## Keputusan"));
+        assert!(standup.contains("tepat 4 bagian"));
+        assert!(MomTemplate::General.system_prompt().contains("## Pertanyaan Terbuka"));
+    }
+
+    #[test]
+    fn template_ids_round_trip() {
+        for template in
+            [MomTemplate::General, MomTemplate::Standup, MomTemplate::OneOnOne, MomTemplate::Sales, MomTemplate::Retro]
+        {
+            assert_eq!(MomTemplate::from_id(template.id()), Some(template));
+        }
+        assert_eq!(MomTemplate::from_id("tidak ada"), None);
+    }
+
+    #[test]
+    fn expand_prompt_carries_notes_and_transcript() {
+        let prompt = expand_notes("tenggat?", "", &[segment(Source::System, 0.0, "Jumat.")], &no_names());
+        assert!(prompt.user.starts_with("Catatan singkat saya:
+tenggat?"));
+        assert!(prompt.user.contains("[00:00] Lainnya: Jumat."));
+    }
+
+    #[test]
+    fn suggestions_are_based_on_the_latest_transcript_only() {
+        let segments: Vec<_> = (0..100).map(|i| segment(Source::System, f64::from(i), &format!("ucapan{i}x"))).collect();
+        let prompt = suggest_questions("", &segments, &no_names());
+        assert!(prompt.user.contains("ucapan99x") && prompt.user.contains("ucapan40x"));
+        assert!(!prompt.user.contains("ucapan39x"));
+    }
+
+    #[test]
+    fn questions_are_read_from_bulleted_or_numbered_lines() {
+        let reply = "Berikut:
+- Apa keputusan anggaran?
+2. Siapa pemilik tugas?
+* Kapan tenggatnya?
+- bukan pertanyaan";
+        assert_eq!(
+            parse_questions(reply),
+            ["Apa keputusan anggaran?", "Siapa pemilik tugas?", "Kapan tenggatnya?"]
+        );
+        assert!(parse_questions("").is_empty());
     }
 }
