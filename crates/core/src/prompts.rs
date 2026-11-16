@@ -177,6 +177,58 @@ Usulkan pertanyaan.",
     Prompt { system: SUGGEST_SYSTEM.into(), user }
 }
 
+const CATCH_UP_SYSTEM: &str = "\
+Anda mendampingi pengguna yang baru bergabung atau sempat tidak menyimak sebuah rapat yang sedang \
+berlangsung. Dalam bahasa Indonesia yang singkat dan jelas, bantu ia langsung paham situasinya \
+dari transkrip. Tulis tepat empat bagian dengan judul ini, masing-masing satu sampai tiga butir \
+diawali \"- \":\n\
+Sedang dibahas:\n\
+Sudah diputuskan atau disepakati:\n\
+Yang diminta dari saya atau perlu saya ketahui:\n\
+Istilah atau konteks penting:\n\
+Hanya berdasarkan transkrip, jangan menebak; jika suatu bagian tidak ada, tulis \"- (belum ada)\". \
+\"Saya\" adalah pengguna. Transkrip berasal dari pengenalan suara dan bisa salah dengar. Teks biasa, \
+tanpa format Markdown (tanpa tanda * atau #).";
+
+const EXPLAIN_SYSTEM: &str = "\
+Anda membantu pengguna yang sedang mengikuti rapat dan kurang paham satu ucapan. Jelaskan dalam \
+bahasa Indonesia yang sederhana, paling banyak empat kalimat: apa maksud ucapan itu dalam konteks \
+rapat ini, dan arti istilah, singkatan, atau nama yang mungkin asing. Gunakan percakapan di sekitarnya \
+sebagai konteks dan katakan jika konteksnya belum cukup. Transkrip bisa salah dengar; jika sebuah kata \
+tampak keliru, sebutkan kemungkinan yang dimaksud. Teks biasa, tanpa format Markdown.";
+
+/// How many lines before and after the line to explain are given as context.
+const EXPLAIN_CONTEXT_LINES: usize = 12;
+
+/// A recap of the last `window_secs` of the meeting, for someone who just joined or looked away.
+/// `segments` must be in time order.
+pub fn catch_up(window_secs: f64, mom: &str, segments: &[TranscriptSegment], names: &SpeakerNames) -> Prompt {
+    let end = segments.iter().map(|segment| segment.end_secs).fold(0.0, f64::max);
+    let recent: Vec<TranscriptSegment> =
+        segments.iter().filter(|segment| segment.end_secs >= end - window_secs).cloned().collect();
+    let user = format!(
+        "MoM sejauh ini (latar belakang):\n{}\n\nTranskrip {} menit terakhir:\n{}\n\nBantu saya menyusul.",
+        or_none(mom),
+        (window_secs / 60.0).round().max(1.0),
+        format_transcript(&recent, names),
+    );
+    Prompt { system: CATCH_UP_SYSTEM.into(), user }
+}
+
+/// Explains the line that starts at `at_secs`, using the lines around it. `segments` must be in time order.
+pub fn explain(text: &str, at_secs: f64, mom: &str, segments: &[TranscriptSegment], names: &SpeakerNames) -> Prompt {
+    let position = segments.iter().position(|segment| segment.start_secs >= at_secs).unwrap_or(segments.len());
+    let from = position.saturating_sub(EXPLAIN_CONTEXT_LINES);
+    let to = (position + EXPLAIN_CONTEXT_LINES + 1).min(segments.len());
+    let user = format!(
+        "MoM sejauh ini:\n{}\n\nPercakapan di sekitarnya:\n{}\n\nUcapan yang saya tidak paham: \"{}\"",
+        or_none(mom),
+        format_transcript(&segments[from..to], names),
+        text.trim(),
+    );
+    Prompt { system: EXPLAIN_SYSTEM.into(), user }
+}
+
 /// The questions in an LLM reply that lists one per line, with or without a bullet or number.
 pub fn parse_questions(reply: &str) -> Vec<String> {
     reply
@@ -248,6 +300,31 @@ mod tests {
             format_transcript(&segments, &no_names()),
             "[00:05] Saya: Selamat pagi.\n[02:05] Lainnya: Pagi, kita mulai."
         );
+    }
+
+    #[test]
+    fn a_catch_up_covers_only_the_recent_window_and_asks_for_four_parts() {
+        let segments = [
+            segment(Source::System, 0.0, "Pembukaan."),
+            segment(Source::System, 590.0, "Kita bahas anggaran."),
+            segment(Source::System, 600.0, "Disetujui."),
+        ];
+        let prompt = catch_up(300.0, "## Ringkasan\n- Rapat", &segments, &no_names());
+        assert!(!prompt.user.contains("Pembukaan."));
+        assert!(prompt.user.contains("Transkrip 5 menit terakhir:\n[09:50] Lainnya: Kita bahas anggaran.\n[10:00] Lainnya: Disetujui."));
+        assert!(prompt.user.contains("- Rapat"));
+        for heading in ["Sedang dibahas:", "Sudah diputuskan atau disepakati:", "Yang diminta dari saya", "Istilah atau konteks penting:"] {
+            assert!(prompt.system.contains(heading), "missing {heading}");
+        }
+    }
+
+    #[test]
+    fn explaining_a_line_shows_the_lines_around_it_but_not_far_ones() {
+        let segments: Vec<_> = (0..40).map(|i| segment(Source::System, f64::from(i) * 10.0, &format!("kalimat {i}"))).collect();
+        let prompt = explain(" kalimat 20 ", 200.0, "", &segments, &no_names());
+        assert!(prompt.user.contains("kalimat 20") && prompt.user.contains("kalimat 8") && prompt.user.contains("kalimat 32"));
+        assert!(!prompt.user.contains("kalimat 7\n") && !prompt.user.contains("kalimat 33"));
+        assert!(prompt.user.ends_with("Ucapan yang saya tidak paham: \"kalimat 20\""));
     }
 
     #[test]

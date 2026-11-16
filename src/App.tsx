@@ -3,9 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { AskPanel } from "./AskPanel";
 import { History } from "./History";
 import { MomPanel } from "./MomPanel";
+import { ModelPicker, Models } from "./Models";
+import { useModels } from "./providers";
 import {
   TEMPLATES,
+  catchUp,
   exportMeeting,
+  explainLine,
   rebuildMom,
   setTemplate as applyTemplate,
   useBookmarks,
@@ -36,6 +40,8 @@ export function App() {
   const [title, setTitle] = useState("");
   const [template, setTemplate] = useState("general");
   const [showHistory, setShowHistory] = useState(false);
+  const [showModels, setShowModels] = useState(false);
+  const modelSettings = useModels();
   /** The outcome of the last action that is not part of recording, shown like `error`. */
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -45,6 +51,18 @@ export function App() {
       setTemplate(opened.template);
     }
   }, [opened]);
+
+  const [recapMinutes, setRecapMinutes] = useState(5);
+  const [recap, setRecap] = useState<"loading" | { text: string; ok: boolean } | null>(null);
+
+  async function runCatchUp() {
+    setRecap("loading");
+    try {
+      setRecap({ text: (await catchUp(recapMinutes)) ?? "Belum ada ucapan untuk diringkas.", ok: true });
+    } catch (reason) {
+      setRecap({ text: String(reason), ok: false });
+    }
+  }
 
   function report(action: Promise<unknown>) {
     setNotice(null);
@@ -116,6 +134,26 @@ export function App() {
             </option>
           ))}
         </select>
+        <select
+          value={recapMinutes}
+          onChange={(event) => setRecapMinutes(Number(event.target.value))}
+          aria-label="Rentang untuk Susul saya"
+          className="rounded-md border border-zinc-300 px-2 py-1.5 text-sm"
+        >
+          {[3, 5, 10, 30].map((minutes) => (
+            <option key={minutes} value={minutes}>
+              {minutes} menit
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={() => void runCatchUp()}
+          disabled={meetingId === 0 || segments.length === 0 || recap === "loading"}
+          title="Ringkas apa yang baru saja dibahas, supaya langsung paham"
+          className="rounded-md bg-indigo-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-800 disabled:opacity-50"
+        >
+          Susul saya
+        </button>
         {status === "recording" && (
           <button onClick={markNow} className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50">
             Tandai
@@ -135,8 +173,21 @@ export function App() {
         >
           Impor
         </button>
+        <ModelPicker models={modelSettings.models} apply={modelSettings.apply} />
         <button
-          onClick={() => setShowHistory((shown) => !shown)}
+          onClick={() => {
+            setShowModels((shown) => !shown);
+            setShowHistory(false);
+          }}
+          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50"
+        >
+          {showModels ? "Kembali" : "Model"}
+        </button>
+        <button
+          onClick={() => {
+            setShowHistory((shown) => !shown);
+            setShowModels(false);
+          }}
           disabled={status !== "idle"}
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
         >
@@ -144,13 +195,33 @@ export function App() {
         </button>
       </header>
 
+      {recap && (
+        <section className="flex items-start gap-3 border-b border-indigo-200 bg-indigo-50 px-5 py-3 text-sm text-indigo-950">
+          <div className="min-w-0 flex-1">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-indigo-700">
+              Susul saya · {recapMinutes} menit terakhir
+            </p>
+            {recap === "loading" ? (
+              <p>Membaca percakapan…</p>
+            ) : (
+              <p className={`whitespace-pre-wrap leading-relaxed ${recap.ok ? "" : "text-red-700"}`}>{recap.text}</p>
+            )}
+          </div>
+          <button onClick={() => setRecap(null)} aria-label="Tutup ringkasan" className="text-indigo-700 hover:text-indigo-950">
+            Tutup
+          </button>
+        </section>
+      )}
+
       {(error ?? notice) && (
         <p role="alert" className="border-b border-red-200 bg-red-50 px-5 py-2 text-sm text-red-800">
           {error ?? notice}
         </p>
       )}
 
-      {showHistory ? (
+      {showModels ? (
+        <Models models={modelSettings.models} error={modelSettings.error} apply={modelSettings.apply} />
+      ) : showHistory ? (
         <History onOpen={(id) => void openFromHistory(id)} onDeletedCurrent={clear} />
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-[1fr_1fr_18rem]">
@@ -215,6 +286,20 @@ function Transcript({ segments, status, names, onRename, onBookmark }: Transcrip
     end.current?.scrollIntoView({ block: "end" });
   }, [segments.length]);
 
+  /** What the assistant said about a line, by the line's start time. */
+  const [explanations, setExplanations] = useState<Record<number, { text: string; ok: boolean }>>({});
+
+  async function explain(segment: Segment) {
+    const at = segment.start_secs;
+    setExplanations((current) => ({ ...current, [at]: { text: "Menjelaskan…", ok: true } }));
+    try {
+      const text = await explainLine(segment.text, at);
+      setExplanations((current) => ({ ...current, [at]: { text, ok: true } }));
+    } catch (reason) {
+      setExplanations((current) => ({ ...current, [at]: { text: String(reason), ok: false } }));
+    }
+  }
+
   if (segments.length === 0) {
     return (
       <main className="flex items-center justify-center border-r border-zinc-200 px-5 text-center text-sm text-zinc-500">
@@ -232,21 +317,44 @@ function Transcript({ segments, status, names, onRename, onBookmark }: Transcrip
         {segments.map((segment) => (
           <li
             key={`${segment.source}-${segment.start_secs}`}
-            className="group grid grid-cols-[3rem_5.5rem_1fr_1.5rem] gap-3 text-sm"
+            className="group grid grid-cols-[3rem_5.5rem_1fr_3.5rem] gap-3 text-sm"
           >
             <time className="font-mono tabular-nums text-zinc-500">{formatClock(segment.start_secs)}</time>
             <span className={`break-words font-medium ${SPEAKER_COLOR[segment.source]}`}>
               {speakerLabel(segment, names)}
             </span>
-            <p className="leading-relaxed">{segment.text}</p>
-            <button
-              onClick={() => onBookmark(segment)}
-              aria-label={`Tandai ${formatClock(segment.start_secs)}`}
-              title="Tandai bagian ini"
-              className="text-zinc-300 opacity-0 hover:text-amber-600 focus:opacity-100 group-hover:opacity-100"
-            >
-              ☆
-            </button>
+            <div>
+              <p className="leading-relaxed">{segment.text}</p>
+              {explanations[segment.start_secs] && (
+                <p
+                  className={`mt-1 whitespace-pre-wrap rounded-md border px-3 py-2 leading-relaxed ${
+                    explanations[segment.start_secs].ok
+                      ? "border-indigo-200 bg-indigo-50 text-indigo-950"
+                      : "border-red-200 bg-red-50 text-red-800"
+                  }`}
+                >
+                  {explanations[segment.start_secs].text}
+                </p>
+              )}
+            </div>
+            <span className="flex items-start gap-2 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+              <button
+                onClick={() => void explain(segment)}
+                aria-label={`Jelaskan ${formatClock(segment.start_secs)}`}
+                title="Jelaskan ucapan ini"
+                className="font-medium text-indigo-600 hover:text-indigo-900"
+              >
+                ?
+              </button>
+              <button
+                onClick={() => onBookmark(segment)}
+                aria-label={`Tandai ${formatClock(segment.start_secs)}`}
+                title="Tandai bagian ini"
+                className="text-zinc-400 hover:text-amber-600"
+              >
+                ☆
+              </button>
+            </span>
           </li>
         ))}
       </ol>

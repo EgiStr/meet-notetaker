@@ -15,6 +15,7 @@ pub mod openai_llm;
 pub mod openai_transcriber;
 pub mod polyvoice_diarizer;
 pub mod prompts;
+pub mod providers;
 pub mod session;
 pub mod speakers;
 pub mod store;

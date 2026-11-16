@@ -203,6 +203,27 @@ impl MeetingNotes {
         Ok(prompts::parse_questions(&self.llm.complete(&prompt)?))
     }
 
+    /// A recap of the last `window_secs` for someone who just joined; `None` before anyone spoke.
+    pub fn catch_up(&self, window_secs: f64) -> Result<Option<String>, LlmError> {
+        let prompt = {
+            let state = self.state();
+            if state.segments.is_empty() {
+                return Ok(None);
+            }
+            prompts::catch_up(window_secs, &state.mom, &chronological(&state.segments), &state.names)
+        };
+        Ok(Some(self.llm.complete(&prompt)?))
+    }
+
+    /// What a line of the transcript means, for someone who did not follow it.
+    pub fn explain(&self, text: &str, at_secs: f64) -> Result<String, LlmError> {
+        let prompt = {
+            let state = self.state();
+            prompts::explain(text, at_secs, &state.mom, &chronological(&state.segments), &state.names)
+        };
+        self.llm.complete(&prompt)
+    }
+
     pub fn answer(&self, question: &str) -> Result<String, LlmError> {
         let prompt = {
             let state = self.state();

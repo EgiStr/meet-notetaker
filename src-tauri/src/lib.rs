@@ -10,9 +10,8 @@ use notetaker_core::deepgram_transcriber::{DeepgramSettings, DeepgramTranscriber
 use notetaker_core::export;
 use notetaker_core::import::{load_recording, transcribe_recording};
 use notetaker_core::library;
-use notetaker_core::llm::{LlmClient, LlmError, Prompt};
+use notetaker_core::llm::LlmError;
 use notetaker_core::notes::{Bookmark, MeetingNotes, NotesSnapshot, PeriodicMom};
-use notetaker_core::openai_llm::{OpenAiLlm, OpenAiLlmSettings};
 use notetaker_core::openai_transcriber::{OpenAiSettings, OpenAiTranscriber};
 use notetaker_core::polyvoice_diarizer::PolyvoiceDiarizer;
 use notetaker_core::prompts::MomTemplate;
@@ -22,6 +21,8 @@ use notetaker_core::store::{MeetingSummary, Store};
 use notetaker_core::transcript::{Source, Transcriber, TranscriptSegment};
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+mod models;
 
 const SESSION_EVENT: &str = "session-event";
 const NOTES_EVENT: &str = "notes-event";
@@ -126,7 +127,7 @@ fn start_recording(
     }
     let template = parse_template(template.as_deref().unwrap_or("general"))?;
     let transcriber = transcriber_from_env()?;
-    let notes = Arc::new(MeetingNotes::new(llm_from_env()));
+    let notes = Arc::new(MeetingNotes::new(models::llm(&app)));
     notes.set_template(template);
     let started_at = unix_now()?;
     let audio_dir = new_audio_dir(&app, started_at)?;
@@ -231,7 +232,7 @@ fn import_blocking(app: &AppHandle, path: &Path) -> Result<(), String> {
     // Decode first, so that an unreadable file leaves no empty meeting behind.
     let samples = load_recording(path).map_err(|error| error.to_string())?;
     let transcriber = transcriber_from_env()?;
-    let notes = Arc::new(MeetingNotes::new(llm_from_env()));
+    let notes = Arc::new(MeetingNotes::new(models::llm(app)));
 
     let started_at = unix_now()?;
     let audio_dir = new_audio_dir(app, started_at)?;
@@ -389,6 +390,26 @@ async fn suggest_questions(meeting: State<'_, Meeting>) -> Result<Vec<String>, S
         .map_err(|error| error.to_string())
 }
 
+/// A recap of the last `minutes` of the meeting, for someone who just joined or looked away.
+#[tauri::command]
+async fn catch_up(minutes: u32, meeting: State<'_, Meeting>) -> Result<Option<String>, String> {
+    let notes = meeting.notes()?;
+    spawn_blocking(move || notes.catch_up(f64::from(minutes.clamp(1, 60)) * 60.0))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+/// Explains one transcript line using the conversation around it.
+#[tauri::command]
+async fn explain_line(text: String, at_secs: f64, meeting: State<'_, Meeting>) -> Result<String, String> {
+    let notes = meeting.notes()?;
+    spawn_blocking(move || notes.explain(&text, at_secs))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
 #[derive(serde::Serialize)]
 struct LibraryAnswer {
     answer: String,
@@ -404,7 +425,7 @@ async fn ask_library(question: String, utc_offset_secs: i64, app: AppHandle) -> 
         let Some(prepared) = prepared else {
             return Ok(LibraryAnswer { answer: "Belum ada rapat tersimpan yang bisa dicari.".into(), sources: Vec::new() });
         };
-        let answer = llm_from_env().complete(&prepared.prompt).map_err(|error| error.to_string())?;
+        let answer = models::llm(&app).complete(&prepared.prompt).map_err(|error| error.to_string())?;
         Ok(LibraryAnswer { answer, sources: prepared.sources })
     })
     .await
@@ -479,7 +500,7 @@ struct MeetingView {
 
 /// Makes a saved meeting the current one, so it can be read, asked about and edited.
 #[tauri::command]
-fn open_meeting(id: i64, meeting: State<Meeting>, db: State<Db>) -> Result<MeetingView, String> {
+fn open_meeting(id: i64, app: AppHandle, meeting: State<Meeting>, db: State<Db>) -> Result<MeetingView, String> {
     let mut state = meeting.state();
     if state.session.is_some() {
         return Err("Hentikan rekaman sebelum membuka rapat lain.".into());
@@ -489,7 +510,7 @@ fn open_meeting(id: i64, meeting: State<Meeting>, db: State<Db>) -> Result<Meeti
         .load(id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Rapat tidak ditemukan.".to_string())?;
-    state.notes = Some(Arc::new(MeetingNotes::restore(llm_from_env(), notes.clone())));
+    state.notes = Some(Arc::new(MeetingNotes::restore(models::llm(&app), notes.clone())));
     state.meeting_id = Some(id);
     state.audio_dir = None;
     Ok(MeetingView { summary, notes })
@@ -541,31 +562,6 @@ fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("Variabel lingkungan {name} belum diatur."))
 }
 
-/// A missing or unusable LLM must not prevent recording, so it is reported
-/// later through "MoM tertunda" instead of failing here.
-fn llm_from_env() -> Arc<dyn LlmClient> {
-    let Ok(api_key) = std::env::var("LLM_API_KEY") else {
-        return Arc::new(UnavailableLlm("variabel lingkungan LLM_API_KEY belum diatur".into()));
-    };
-    let settings = OpenAiLlmSettings {
-        base_url: env_or("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
-        api_key,
-        model: env_or("LLM_MODEL", "gemini-2.5-flash"),
-    };
-    match OpenAiLlm::new(settings) {
-        Ok(llm) => Arc::new(llm),
-        Err(error) => Arc::new(UnavailableLlm(error.to_string())),
-    }
-}
-
-struct UnavailableLlm(String);
-
-impl LlmClient for UnavailableLlm {
-    fn complete(&self, _prompt: &Prompt) -> Result<String, LlmError> {
-        Err(LlmError::NotConfigured(self.0.clone()))
-    }
-}
-
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.into())
 }
@@ -595,9 +591,19 @@ pub fn run() {
             remove_bookmark,
             expand_notes,
             suggest_questions,
+            catch_up,
+            explain_line,
             ask_library,
             export_meeting,
-            delete_meeting
+            delete_meeting,
+            models::get_models,
+            models::save_provider,
+            models::remove_provider,
+            models::add_model,
+            models::remove_model,
+            models::activate_model,
+            models::fetch_models,
+            models::test_model
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the application");

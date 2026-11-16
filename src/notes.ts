@@ -83,6 +83,16 @@ export function suggestQuestions(): Promise<string[]> {
   return invoke("suggest_questions");
 }
 
+/** A recap of the last `minutes` for someone who just joined; null before anyone spoke. */
+export function catchUp(minutes: number): Promise<string | null> {
+  return invoke("catch_up", { minutes });
+}
+
+/** What a transcript line means, from the conversation around it. */
+export function explainLine(text: string, atSecs: number): Promise<string> {
+  return invoke("explain_line", { text, atSecs });
+}
+
 export interface LibraryAnswer {
   answer: string;
   sources: { meeting_id: number; title: string; started_at: number }[];

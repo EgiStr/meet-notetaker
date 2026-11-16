@@ -3,6 +3,7 @@ name = "meet-notetaker"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "Apache-2.0"
 
 [lib]
 name = "meet_notetaker_lib"
@@ -20,3 +21,5 @@ tauri-plugin-dialog = "2"
 notetaker-core = { path = "../crates/core" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
+# API keys go to the Windows Credential Manager, never into a file.
+keyring = { version = "3", features = ["windows-native"] }
