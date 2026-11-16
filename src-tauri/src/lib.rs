@@ -11,7 +11,7 @@ use notetaker_core::export;
 use notetaker_core::import::{load_recording, transcribe_recording};
 use notetaker_core::library;
 use notetaker_core::llm::LlmError;
-use notetaker_core::notes::{Bookmark, MeetingNotes, NotesSnapshot, PeriodicMom};
+use notetaker_core::notes::{Bookmark, LiveBrief, MeetingNotes, NotesSnapshot, PeriodicMom};
 use notetaker_core::openai_transcriber::{OpenAiSettings, OpenAiTranscriber};
 use notetaker_core::polyvoice_diarizer::PolyvoiceDiarizer;
 use notetaker_core::prompts::MomTemplate;
@@ -27,6 +27,10 @@ mod models;
 const SESSION_EVENT: &str = "session-event";
 const NOTES_EVENT: &str = "notes-event";
 const MOM_INTERVAL: Duration = Duration::from_secs(120);
+/// How often the live brief is refreshed and how far back it looks; with the minutes and the
+/// question suggestions this stays under the free Gemini limit of 5 requests a minute.
+const BRIEF_INTERVAL: Duration = Duration::from_secs(60);
+const BRIEF_WINDOW_SECS: f64 = 300.0;
 
 /// The meeting database. SQLite connections are used from one thread at a time.
 struct Db(Mutex<Store>);
@@ -44,6 +48,7 @@ struct Meeting(Mutex<MeetingState>);
 struct MeetingState {
     session: Option<Session>,
     periodic_mom: Option<PeriodicMom>,
+    live_brief: Option<LiveBrief>,
     /// Kept after the recording stops so that questions can still be asked.
     notes: Option<Arc<MeetingNotes>>,
     /// The database row of the meeting that `notes` belongs to.
@@ -74,6 +79,8 @@ enum NotesEvent {
     Pending(String),
     /// Questions worth asking the assistant about the meeting so far.
     Questions(Vec<String>),
+    /// The latest recap of what is being discussed, refreshed while recording.
+    Brief(String),
 }
 
 fn emit_error(app: &AppHandle, error: impl std::fmt::Display) {
@@ -154,13 +161,19 @@ fn start_recording(
     ));
     state.audio_dir = Some(audio_dir);
     state.started = Some(Instant::now());
-    let suggesting = notes.clone();
+    let (suggesting, brief_app) = (notes.clone(), app.clone());
     state.periodic_mom = Some(PeriodicMom::start(notes.clone(), MOM_INTERVAL, move |result| {
         let updated = result.is_ok();
         emit_mom(&app, result);
         save_meeting(&app);
         if updated {
             emit_questions(&app, &suggesting);
+        }
+    }));
+    state.live_brief = Some(LiveBrief::start(notes.clone(), BRIEF_INTERVAL, BRIEF_WINDOW_SECS, move |result| {
+        // A failure is not shown: the minutes already report LLM problems, and the next round tries again.
+        if let Ok(brief) = result {
+            let _ = brief_app.emit(NOTES_EVENT, &NotesEvent::Brief(brief));
         }
     }));
     state.notes = Some(notes);
@@ -189,10 +202,16 @@ fn unix_now() -> Result<i64, String> {
 /// and the final minutes were attempted.
 #[tauri::command]
 async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
-    let (session, periodic_mom, notes, audio_dir) = {
+    let (session, periodic_mom, live_brief, notes, audio_dir) = {
         let mut state = meeting.state();
         state.started = None;
-        (state.session.take(), state.periodic_mom.take(), state.notes.clone(), state.audio_dir.clone())
+        (
+            state.session.take(),
+            state.periodic_mom.take(),
+            state.live_brief.take(),
+            state.notes.clone(),
+            state.audio_dir.clone(),
+        )
     };
     spawn_blocking(move || {
         if let Some(session) = session {
@@ -200,6 +219,9 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
         }
         if let Some(periodic_mom) = periodic_mom {
             periodic_mom.stop();
+        }
+        if let Some(live_brief) = live_brief {
+            live_brief.stop();
         }
         if let Some(notes) = notes {
             if let Some(audio_dir) = audio_dir {

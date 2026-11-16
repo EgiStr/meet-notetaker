@@ -50,6 +50,8 @@ struct State {
     segments: Vec<TranscriptSegment>,
     /// How many of `segments` the current minutes already cover.
     summarized: usize,
+    /// How many of `segments` the latest live brief covers.
+    briefed: usize,
     mom: String,
     user_notes: String,
     names: SpeakerNames,
@@ -66,6 +68,7 @@ impl MeetingNotes {
     pub fn restore(llm: Arc<dyn LlmClient>, snapshot: NotesSnapshot) -> Self {
         let state = State {
             summarized: snapshot.segments.len(),
+            briefed: snapshot.segments.len(),
             segments: snapshot.segments,
             mom: snapshot.mom,
             user_notes: snapshot.user_notes,
@@ -215,6 +218,22 @@ impl MeetingNotes {
         Ok(Some(self.llm.complete(&prompt)?))
     }
 
+    /// The recap of the last `window_secs`, but only when something was said since the previous
+    /// brief; `None` otherwise. After a failure the next call tries again.
+    pub fn live_brief(&self, window_secs: f64) -> Result<Option<String>, LlmError> {
+        let (prompt, covered) = {
+            let state = self.state();
+            if state.segments.len() == state.briefed {
+                return Ok(None);
+            }
+            let prompt = prompts::catch_up(window_secs, &state.mom, &chronological(&state.segments), &state.names);
+            (prompt, state.segments.len())
+        };
+        let brief = self.llm.complete(&prompt)?;
+        self.state().briefed = covered;
+        Ok(Some(brief))
+    }
+
     /// What a line of the transcript means, for someone who did not follow it.
     pub fn explain(&self, text: &str, at_secs: f64) -> Result<String, LlmError> {
         let prompt = {
@@ -280,6 +299,40 @@ impl PeriodicMom {
     }
 
     /// Waits for an update that is in flight, then returns.
+    pub fn stop(self) {
+        drop(self.stop);
+        let _ = self.thread.join();
+    }
+}
+
+/// Refreshes the live brief at a fixed interval until stopped, skipping rounds where nothing new was said.
+pub struct LiveBrief {
+    stop: Sender<()>,
+    thread: JoinHandle<()>,
+}
+
+impl LiveBrief {
+    /// `report` receives every new brief and every failed attempt.
+    pub fn start(
+        notes: Arc<MeetingNotes>,
+        interval: Duration,
+        window_secs: f64,
+        report: impl Fn(Result<String, LlmError>) + Send + 'static,
+    ) -> Self {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = thread::spawn(move || {
+            while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
+                match notes.live_brief(window_secs) {
+                    Ok(Some(brief)) => report(Ok(brief)),
+                    Ok(None) => {}
+                    Err(error) => report(Err(error)),
+                }
+            }
+        });
+        Self { stop, thread }
+    }
+
+    /// Waits for a brief that is in flight, then returns.
     pub fn stop(self) {
         drop(self.stop);
         let _ = self.thread.join();
@@ -538,5 +591,21 @@ mod tests {
         assert_eq!(first, Ok("mom 1".to_string()));
         // Nothing new was added, so no further call was made.
         assert_eq!(llm.prompts().len(), 1);
+    }
+
+    #[test]
+    fn a_live_brief_is_made_only_when_something_new_was_said_and_retried_after_a_failure() {
+        let llm = Arc::new(FakeLlm::failing(1));
+        let notes = notes_with(&llm);
+        assert_eq!(notes.live_brief(300.0).unwrap(), None, "nobody has spoken");
+
+        notes.add_segment(segment(0.0, "halo"));
+        assert!(notes.live_brief(300.0).is_err());
+        assert_eq!(notes.live_brief(300.0).unwrap(), Some("mom 2".to_string()), "retried after the failure");
+        assert_eq!(notes.live_brief(300.0).unwrap(), None, "nothing new since");
+
+        notes.add_segment(segment(5.0, "lagi"));
+        assert!(notes.live_brief(300.0).unwrap().is_some());
+        assert_eq!(llm.prompts().len(), 3);
     }
 }

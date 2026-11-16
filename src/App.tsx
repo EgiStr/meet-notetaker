@@ -13,6 +13,7 @@ import {
   rebuildMom,
   setTemplate as applyTemplate,
   useBookmarks,
+  useBrief,
   useMom,
   useQuestions,
 } from "./notes";
@@ -36,6 +37,7 @@ export function App() {
     useRecording();
   const { mom, pending } = useMom(meetingId, opened?.mom ?? "");
   const { questions, setQuestions } = useQuestions(meetingId);
+  const brief = useBrief(meetingId);
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(meetingId, opened?.bookmarks ?? []);
   const [title, setTitle] = useState("");
   const [template, setTemplate] = useState("general");
@@ -194,6 +196,15 @@ export function App() {
           {showHistory ? "Kembali" : "Riwayat"}
         </button>
       </header>
+
+      {status === "recording" && brief && (
+        <details open className="border-b border-indigo-200 bg-indigo-50 px-5 py-2 text-sm text-indigo-950">
+          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-indigo-700">
+            Sekarang · diperbarui otomatis tiap menit
+          </summary>
+          <p className="mt-1 whitespace-pre-wrap leading-relaxed">{brief}</p>
+        </details>
+      )}
 
       {recap && (
         <section className="flex items-start gap-3 border-b border-indigo-200 bg-indigo-50 px-5 py-3 text-sm text-indigo-950">

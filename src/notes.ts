@@ -7,6 +7,7 @@ type NotesEvent =
   | { kind: "mom"; data: string }
   | { kind: "pending"; data: string }
   | { kind: "questions"; data: string[] }
+  | { kind: "brief"; data: string }
   | { kind: "transcript" };
 
 /** The minutes of the current meeting, and why an update is pending when one failed. */
@@ -35,6 +36,24 @@ export function useMom(meetingId: number, savedMom: string) {
   }, []);
 
   return { mom, pending };
+}
+
+/** The recap of what is being discussed, refreshed by the app while recording. */
+export function useBrief(meetingId: number) {
+  const [brief, setBrief] = useState("");
+
+  useEffect(() => setBrief(""), [meetingId]);
+
+  useEffect(() => {
+    const unlisten = listen<NotesEvent>("notes-event", ({ payload }) => {
+      if (payload.kind === "brief") setBrief(payload.data);
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  return brief;
 }
 
 export function rebuildMom(): Promise<void> {
