@@ -51,6 +51,41 @@ pub fn notify(title: String, body: String, app: AppHandle) -> Result<(), String>
     app.notification().builder().title(title).body(body).show().map_err(|error| error.to_string())
 }
 
+const PREVIEW_CHARS: usize = 180;
+
+/// The first lines of the minutes without markdown, short enough for a notification.
+fn summary_preview(mom: &str) -> String {
+    let mut preview = String::new();
+    for line in mom.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let text = line.trim_start_matches(['-', '*', '•', ' ']).replace("**", "");
+        if !preview.is_empty() {
+            preview.push_str(" · ");
+        }
+        preview.push_str(text.trim());
+        if preview.chars().count() >= PREVIEW_CHARS {
+            break;
+        }
+    }
+    if preview.chars().count() > PREVIEW_CHARS {
+        preview = preview.chars().take(PREVIEW_CHARS).collect::<String>().trim_end().to_owned() + "…";
+    }
+    preview
+}
+
+/// Tells the user that the minutes of a finished meeting are ready, unless they are looking at the app.
+pub fn announce_summary(app: &AppHandle, title: &str, mom: &str) {
+    let in_front = app.get_webview_window("main").is_some_and(|window| window.is_focused().unwrap_or(false));
+    let preview = summary_preview(mom);
+    if in_front || preview.is_empty() {
+        return;
+    }
+    let _ = app.notification().builder().title(format!("Ringkasan siap: {title}")).body(preview).show();
+}
+
 /// The online meeting a window title belongs to, if any.
 fn meeting_in(title: &str) -> Option<&'static str> {
     let lower = title.to_lowercase();
@@ -119,6 +154,19 @@ fn watch_for_meetings(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_preview_skips_headings_and_markdown_and_is_cut_short() {
+        let mom = "# Notulen
+
+## Ringkasan
+- **Rilis** mundur ke akhir bulan
+- Anggaran disetujui
+";
+        assert_eq!(summary_preview(mom), "Rilis mundur ke akhir bulan · Anggaran disetujui");
+        assert!(summary_preview(&"kata ".repeat(100)).chars().count() <= PREVIEW_CHARS + 1);
+        assert_eq!(summary_preview("# Hanya judul"), "");
+    }
 
     #[test]
     fn meeting_windows_are_recognised_and_other_windows_are_not() {

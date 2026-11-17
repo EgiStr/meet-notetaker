@@ -259,11 +259,22 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
             if let Some(meeting_id) = untitled_id {
                 auto_title(&app, &notes, meeting_id);
             }
+            announce_finished(&app, &notes);
             index_in_background(&app);
         }
     })
     .await
     .map_err(|error| error.to_string())
+}
+
+/// Notifies the user that the minutes of the current meeting are ready.
+fn announce_finished(app: &AppHandle, notes: &MeetingNotes) {
+    let Some(id) = app.state::<Meeting>().state().meeting_id else { return };
+    let title = match app.state::<Db>().store().load(id) {
+        Ok(Some((summary, _))) if !summary.title.trim().is_empty() => summary.title,
+        _ => "Rapat".to_owned(),
+    };
+    desktop::announce_summary(app, &title, &notes.snapshot().mom);
 }
 
 /// Processes a recording file like a meeting that just ended: transcript,
@@ -314,6 +325,7 @@ fn import_blocking(app: &AppHandle, path: &Path) -> Result<(), String> {
     compress_audio(app, &audio_dir);
     rebuild_and_emit(app, &notes);
     save_meeting(app);
+    announce_finished(app, &notes);
     index_in_background(app);
     transcribed.map_err(|error| error.to_string())
 }
