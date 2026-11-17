@@ -123,6 +123,16 @@ impl MeetingNotes {
         self.state().segments.push(segment);
     }
 
+    /// Swaps the transcript of one stream for a better one, e.g. from a second pass over the
+    /// finished recording. Lines the user corrected are not part of this: the pass runs before
+    /// anyone can edit.
+    pub fn replace_segments(&self, source: Source, segments: Vec<TranscriptSegment>) {
+        let mut state = self.state();
+        state.segments.retain(|segment| segment.source != source);
+        state.segments.extend(segments);
+        state.segments = chronological(&state.segments);
+    }
+
     /// Replaces the words of one line, found by its stream and start time. An empty text
     /// leaves the line as it was. Returns whether a line was changed.
     pub fn edit_segment(&self, source: Source, start_secs: f64, text: &str) -> bool {
@@ -384,6 +394,17 @@ impl LiveBrief {
 mod tests {
     use super::*;
     use crate::llm::Prompt;
+
+    #[test]
+    fn replacing_one_stream_keeps_the_other() {
+        let notes = MeetingNotes::new(Arc::new(FakeLlm::default()));
+        let line = |source, start: f64, text: &str| TranscriptSegment { source, start_secs: start, end_secs: start + 1.0, text: text.into(), speaker: None };
+        notes.add_segment(line(Source::Microphone, 1.0, "aduh"));
+        notes.add_segment(line(Source::System, 2.0, "lama"));
+        notes.replace_segments(Source::System, vec![line(Source::System, 0.5, "baru")]);
+        let texts: Vec<String> = notes.transcript().into_iter().map(|s| s.text).collect();
+        assert_eq!(texts, vec!["baru", "aduh"]);
+    }
 
     #[test]
     fn editing_a_line_changes_only_that_line() {

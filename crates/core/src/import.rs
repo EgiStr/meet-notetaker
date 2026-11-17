@@ -62,6 +62,60 @@ pub fn transcribe_recording(
     Ok(())
 }
 
+/// Speech must be this many times louder than the stream's quiet level.
+const SPEECH_OVER_NOISE: f32 = 2.5;
+const MIN_SPEECH_RMS: f32 = 0.01;
+const MAX_SPEECH_RMS: f32 = 0.08;
+const FRAME: usize = 480;
+
+/// The loudness that separates speech from the background of this stream. A microphone in a noisy
+/// room never goes quiet, so a fixed threshold would send noise to the transcriber, which then
+/// invents words for it.
+fn speech_threshold(samples: &[f32]) -> f32 {
+    let mut levels: Vec<f32> = samples
+        .chunks_exact(FRAME)
+        .map(|frame| (frame.iter().map(|x| x * x).sum::<f32>() / FRAME as f32).sqrt())
+        .collect();
+    if levels.is_empty() {
+        return MIN_SPEECH_RMS;
+    }
+    levels.sort_by(f32::total_cmp);
+    let quiet = levels[levels.len() / 5];
+    (quiet * SPEECH_OVER_NOISE).clamp(MIN_SPEECH_RMS, MAX_SPEECH_RMS)
+}
+
+/// A finished stream is transcribed again in long pieces, cut at pauses: the model sees whole
+/// sentences instead of the 6 s fragments a live session needs, which is much more accurate.
+fn refine_config(samples: &[f32]) -> ChunkerConfig {
+    ChunkerConfig {
+        min_chunk_secs: 15.0,
+        max_chunk_secs: 30.0,
+        pause_secs: 0.6,
+        long_pause_secs: 60.0,
+        speech_rms: speech_threshold(samples),
+    }
+}
+
+/// Transcribes one finished stream in long pieces. The segments are returned, not delivered, so the
+/// caller can keep the live transcript when this fails.
+pub fn refine_stream(
+    samples: &[f32],
+    source: Source,
+    transcriber: &dyn Transcriber,
+    wait: &dyn Fn(Duration),
+) -> Result<Vec<TranscriptSegment>, TranscribeError> {
+    let mut chunker = Chunker::new(refine_config(samples));
+    let mut chunks = chunker.push(samples);
+    chunks.extend(chunker.flush());
+
+    let mut segments = Vec::new();
+    for Chunk { start_sample, samples } in chunks {
+        let chunk = AudioChunk { source, start_secs: samples_to_seconds(start_sample), samples };
+        segments.extend(transcribe_with_retry(&chunk, transcriber, wait)?);
+    }
+    Ok(segments)
+}
+
 fn transcribe_with_retry(
     chunk: &AudioChunk,
     transcriber: &dyn Transcriber,
@@ -128,6 +182,24 @@ mod tests {
 
     fn silence(seconds: f64) -> Vec<f32> {
         vec![0.0; seconds_to_samples(seconds)]
+    }
+
+    #[test]
+    fn a_noisy_stream_gets_a_higher_speech_threshold_than_a_clean_one() {
+        let noise = vec![0.03_f32; seconds_to_samples(2.0)];
+        assert!(speech_threshold(&noise) > 0.06);
+        assert_eq!(speech_threshold(&silence(2.0)), MIN_SPEECH_RMS);
+        assert_eq!(speech_threshold(&vec![0.5; seconds_to_samples(2.0)]), MAX_SPEECH_RMS);
+    }
+
+    #[test]
+    fn background_noise_is_not_sent_but_louder_speech_is() {
+        let transcriber = FakeTranscriber::failing(0, 0);
+        let mut stream = vec![0.03_f32; seconds_to_samples(20.0)];
+        stream.extend(speech(5.0));
+        let segments = refine_stream(&stream, Source::Microphone, &transcriber, &|_| {}).unwrap();
+        assert_eq!(transcriber.calls(), 1);
+        assert!(segments[0].start_secs >= 19.0);
     }
 
     fn import(samples: &[f32], transcriber: &FakeTranscriber) -> (Result<(), TranscribeError>, Vec<TranscriptSegment>, usize) {

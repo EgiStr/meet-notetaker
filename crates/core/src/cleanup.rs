@@ -61,6 +61,26 @@ struct Stream {
     last_end: f64,
 }
 
+/// Short microphone lines that fall inside what the computer was playing at that moment. Without
+/// headphones the microphone hears the speakers faintly, and the model turns that into short
+/// invented phrases. Longer lines are kept: someone really talking over the call.
+pub fn without_speaker_bleed(microphone: Vec<TranscriptSegment>, system: &[TranscriptSegment]) -> Vec<TranscriptSegment> {
+    const MAX_WORDS: usize = 6;
+    const COVERED: f64 = 0.7;
+    microphone
+        .into_iter()
+        .filter(|line| {
+            let duration = (line.end_secs - line.start_secs).max(0.001);
+            let covered: f64 = system
+                .iter()
+                .map(|other| (line.end_secs.min(other.end_secs) - line.start_secs.max(other.start_secs)).max(0.0))
+                .sum();
+            let bleed = line.text.split_whitespace().count() <= MAX_WORDS && covered / duration >= COVERED;
+            !bleed
+        })
+        .collect()
+}
+
 /// Wraps a transcriber with the glossary prompt and the cleanup above.
 pub struct CleaningTranscriber {
     inner: Arc<dyn Transcriber>,
@@ -168,6 +188,19 @@ mod tests {
 
     fn texts(segments: Vec<TranscriptSegment>) -> Vec<String> {
         segments.into_iter().map(|s| s.text).collect()
+    }
+
+    #[test]
+    fn short_microphone_lines_over_the_call_audio_are_bleed_but_real_interruptions_stay() {
+        let line = |source, start: f64, end: f64, text: &str| TranscriptSegment { source, start_secs: start, end_secs: end, text: text.into(), speaker: None };
+        let system = vec![line(Source::System, 10.0, 20.0, "kata orang lain")];
+        let mic = vec![
+            line(Source::Microphone, 12.0, 13.0, "What is this?"),
+            line(Source::Microphone, 12.0, 18.0, "Saya ingin menambahkan satu hal penting soal anggaran ini"),
+            line(Source::Microphone, 30.0, 31.0, "Oke."),
+        ];
+        let kept: Vec<String> = without_speaker_bleed(mic, &system).into_iter().map(|s| s.text).collect();
+        assert_eq!(kept, vec!["Saya ingin menambahkan satu hal penting soal anggaran ini", "Oke."]);
     }
 
     #[test]

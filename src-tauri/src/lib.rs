@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use notetaker_core::audio::WavRecorder;
 use notetaker_core::deepgram_transcriber::{DeepgramSettings, DeepgramTranscriber};
 use notetaker_core::export;
-use notetaker_core::import::{load_recording, transcribe_recording};
+use notetaker_core::import::{load_recording, refine_stream, transcribe_recording};
 use notetaker_core::library;
 use notetaker_core::llm::LlmError;
 use notetaker_core::notes::{Bookmark, LiveBrief, MeetingNotes, NotesSnapshot, PeriodicMom};
@@ -20,7 +20,7 @@ use notetaker_core::semantic;
 use notetaker_core::session::{recording_path, EventSink, Session, SessionEvent};
 use notetaker_core::speakers::Diarizer;
 use notetaker_core::store::{MeetingSummary, Store};
-use notetaker_core::cleanup::CleaningTranscriber;
+use notetaker_core::cleanup::{without_speaker_bleed, CleaningTranscriber};
 use notetaker_core::transcript::{Source, Transcriber, TranscriptSegment};
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -249,6 +249,7 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
         }
         if let Some(notes) = notes {
             if let Some(audio_dir) = audio_dir {
+                refine_transcript(&app, &notes, &audio_dir);
                 label_speakers(&app, &notes, &PolyvoiceDiarizer, &audio_dir);
                 compress_audio(&app, &audio_dir);
             }
@@ -314,6 +315,43 @@ fn import_blocking(app: &AppHandle, path: &Path) -> Result<(), String> {
     save_meeting(app);
     index_in_background(app);
     transcribed.map_err(|error| error.to_string())
+}
+
+/// Transcribes each finished stream again, in long pieces with the stronger model, and uses that
+/// instead of the live text, which is cut into short pieces to appear quickly. A failure keeps the
+/// live transcript and is reported.
+fn refine_transcript(app: &AppHandle, notes: &MeetingNotes, audio_dir: &Path) {
+    let transcriber = match build_transcriber(app, true) {
+        Ok(transcriber) => transcriber,
+        Err(error) => return emit_error(app, error),
+    };
+    for source in [Source::System, Source::Microphone] {
+        let path = recording_path(audio_dir, source);
+        let live = notes.transcript().iter().any(|segment| segment.source == source);
+        if !live || !path.exists() {
+            continue;
+        }
+        let outcome = load_recording(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|samples| {
+                refine_stream(&samples, source, transcriber.as_ref(), &std::thread::sleep).map_err(|error| error.to_string())
+            });
+        match outcome {
+            // Nothing found in the system audio means the second pass failed to hear it, not silence.
+            Ok(segments) if source == Source::System && segments.is_empty() => {}
+            Ok(segments) => {
+                let segments = if source == Source::Microphone {
+                    let system: Vec<_> = notes.transcript().into_iter().filter(|s| s.source == Source::System).collect();
+                    without_speaker_bleed(segments, &system)
+                } else {
+                    segments
+                };
+                notes.replace_segments(source, segments);
+                let _ = app.emit(NOTES_EVENT, &NotesEvent::Transcript(notes.transcript()));
+            }
+            Err(error) => emit_error(app, error),
+        }
+    }
 }
 
 /// Runs the final diarization on the system audio. A failure leaves the
@@ -683,18 +721,30 @@ fn open_meeting(id: i64, app: AppHandle, meeting: State<Meeting>, db: State<Db>)
 /// any OpenAI-compatible endpoint), "deepgram" or "whisper" (offline).
 /// Settings come from the environment until the Settings screen exists.
 fn transcriber_from_env(app: &AppHandle) -> Result<Arc<dyn Transcriber>, String> {
+    build_transcriber(app, false)
+}
+
+/// `final_pass`: the slower, more accurate model used over a finished recording.
+fn build_transcriber(app: &AppHandle, final_pass: bool) -> Result<Arc<dyn Transcriber>, String> {
     let language = spoken_language(app);
     let provider = env_or("STT_PROVIDER", "openai");
     let transcriber: Arc<dyn Transcriber> = match provider.as_str() {
-        "openai" => Arc::new(
-            OpenAiTranscriber::new(OpenAiSettings {
-                base_url: env_or("STT_BASE_URL", "https://api.groq.com/openai/v1"),
-                api_key: required_env("STT_API_KEY")?,
-                model: env_or("STT_MODEL", "whisper-large-v3-turbo"),
-                language,
-            })
-            .map_err(|error| error.to_string())?,
-        ),
+        "openai" => {
+            let base_url = env_or("STT_BASE_URL", "https://api.groq.com/openai/v1");
+            let live_model = env_or("STT_MODEL", "whisper-large-v3-turbo");
+            let model = match std::env::var("STT_FINAL_MODEL") {
+                Ok(model) if final_pass => model,
+                // Groq's full model is clearly more accurate than the turbo one, for the cost of time.
+                _ if final_pass && base_url.contains("groq.com") && live_model == "whisper-large-v3-turbo" => {
+                    "whisper-large-v3".into()
+                }
+                _ => live_model,
+            };
+            Arc::new(
+                OpenAiTranscriber::new(OpenAiSettings { base_url, api_key: required_env("STT_API_KEY")?, model, language })
+                    .map_err(|error| error.to_string())?,
+            )
+        }
         "deepgram" => Arc::new(
             DeepgramTranscriber::new(DeepgramSettings {
                 api_key: required_env("DEEPGRAM_API_KEY")?,
