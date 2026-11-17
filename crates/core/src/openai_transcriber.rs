@@ -34,6 +34,10 @@ impl OpenAiTranscriber {
 
 impl Transcriber for OpenAiTranscriber {
     fn transcribe(&self, chunk: &AudioChunk) -> Result<Vec<TranscriptSegment>, TranscribeError> {
+        self.transcribe_with_prompt(chunk, "")
+    }
+
+    fn transcribe_with_prompt(&self, chunk: &AudioChunk, prompt: &str) -> Result<Vec<TranscriptSegment>, TranscribeError> {
         let audio = multipart::Part::bytes(encode_wav(&chunk.samples)?)
             .file_name("chunk.wav")
             .mime_str("audio/wav")?;
@@ -42,6 +46,7 @@ impl Transcriber for OpenAiTranscriber {
             .text("language", self.settings.language.clone())
             .text("response_format", "verbose_json")
             .part("file", audio);
+        let form = if prompt.is_empty() { form } else { form.text("prompt", prompt.to_owned()) };
 
         let response = self
             .client

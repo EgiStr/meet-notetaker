@@ -91,8 +91,10 @@ export function App() {
   const modelSettings = useModels();
   const autostart = useAutostart();
   const [language, setLanguage] = useState("id");
+  const [glossary, setGlossary] = useState("");
   useEffect(() => {
     invoke<string>("get_language").then(setLanguage, () => {});
+    invoke<string>("get_glossary").then(setGlossary, () => {});
   }, []);
   /** The outcome of the last action that is not part of recording, shown like `error`. */
   const [notice, setNotice] = useState<string | null>(null);
@@ -299,6 +301,17 @@ export function App() {
                   </option>
                 ))}
               </select>
+            </label>
+            <label className="flex flex-col gap-1 px-2 py-1.5 text-xs text-zinc-500">
+              Istilah dan nama (agar ejaan benar)
+              <textarea
+                value={glossary}
+                onChange={(event) => setGlossary(event.target.value)}
+                onBlur={() => report(invoke("set_glossary", { text: glossary }))}
+                rows={2}
+                placeholder="Kubernetes, Budi, nama produk…"
+                className="resize-none rounded-md border border-zinc-300 px-2 py-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-500"
+              />
             </label>
             <label className="flex flex-col gap-1 px-2 py-1.5 text-xs text-zinc-500">
               Nama saya (beri tahu saat disebut)

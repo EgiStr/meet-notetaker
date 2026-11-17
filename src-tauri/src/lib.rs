@@ -20,6 +20,7 @@ use notetaker_core::semantic;
 use notetaker_core::session::{recording_path, EventSink, Session, SessionEvent};
 use notetaker_core::speakers::Diarizer;
 use notetaker_core::store::{MeetingSummary, Store};
+use notetaker_core::cleanup::CleaningTranscriber;
 use notetaker_core::transcript::{Source, Transcriber, TranscriptSegment};
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -705,7 +706,7 @@ fn transcriber_from_env(app: &AppHandle) -> Result<Arc<dyn Transcriber>, String>
         "whisper" => local_whisper(language)?,
         other => return Err(format!("STT_PROVIDER \"{other}\" tidak dikenal. Pilihan: openai, deepgram, whisper.")),
     };
-    Ok(transcriber)
+    Ok(Arc::new(CleaningTranscriber::new(transcriber, &glossary(app))))
 }
 
 #[cfg(feature = "local-whisper")]
@@ -731,6 +732,27 @@ fn spoken_language(app: &AppHandle) -> String {
         .map(|text| text.trim().to_owned())
         .filter(|code| !code.is_empty())
         .unwrap_or_else(|| env_or("STT_LANGUAGE", "id"))
+}
+
+fn glossary_file(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|dir| dir.join("glossary.txt"))
+}
+
+/// Names and terms the user wants spelled correctly in the transcript.
+fn glossary(app: &AppHandle) -> String {
+    glossary_file(app).and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_glossary(app: AppHandle) -> String {
+    glossary(&app)
+}
+
+/// Applies to the next recording or import.
+#[tauri::command]
+fn set_glossary(text: String, app: AppHandle) -> Result<(), String> {
+    let path = glossary_file(&app).ok_or("Folder data aplikasi tidak ditemukan.")?;
+    std::fs::write(path, text.trim()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -786,6 +808,8 @@ pub fn run() {
             tray::get_autostart,
             tray::set_autostart,
             edit_segment,
+            get_glossary,
+            set_glossary,
             get_language,
             set_language,
             search_history,

@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod capture;
 pub mod chunker;
+pub mod cleanup;
 pub mod compress;
 pub mod deepgram_transcriber;
 pub mod embed;

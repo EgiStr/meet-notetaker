@@ -50,4 +50,10 @@ pub enum TranscribeError {
 
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, chunk: &AudioChunk) -> Result<Vec<TranscriptSegment>, TranscribeError>;
+
+    /// Like `transcribe`, with names, terms and the text just before the chunk as a hint.
+    /// Providers that cannot use a hint ignore it.
+    fn transcribe_with_prompt(&self, chunk: &AudioChunk, _prompt: &str) -> Result<Vec<TranscriptSegment>, TranscribeError> {
+        self.transcribe(chunk)
+    }
 }
