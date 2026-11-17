@@ -4,6 +4,7 @@ import { AskPanel } from "./AskPanel";
 import { History } from "./History";
 import { MomPanel } from "./MomPanel";
 import { ModelPicker, Models } from "./Models";
+import { mentions, parseNames } from "./mentions";
 import { useModels } from "./providers";
 import {
   TEMPLATES,
@@ -27,7 +28,24 @@ import {
   useRecording,
 } from "./recording";
 
-const SPEAKER_COLOR: Record<Source, string> = {
+/** A short soft tone, so a mention is noticed without looking at the screen. */
+function beep() {
+  try {
+    const audio = new AudioContext();
+    const tone = audio.createOscillator();
+    const volume = audio.createGain();
+    volume.gain.value = 0.08;
+    tone.frequency.value = 880;
+    tone.connect(volume).connect(audio.destination);
+    tone.start();
+    tone.stop(audio.currentTime + 0.25);
+    tone.onended = () => void audio.close();
+  } catch {
+    // No sound available; the banner still shows.
+  }
+}
+
+const SPEAKER_COLOR:Record<Source, string> = {
   microphone: "text-sky-700",
   system: "text-amber-700",
 };
@@ -53,6 +71,40 @@ export function App() {
       setTemplate(opened.template);
     }
   }, [opened]);
+
+  const [myName, setMyName] = useState(() => {
+    try {
+      return localStorage.getItem("myName") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const myNames = parseNames(myName);
+  /** The latest line from someone else that said one of the user's names. */
+  const [mention, setMention] = useState<Segment | null>(null);
+  const checked = useRef(new Set<string>());
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("myName", myName);
+    } catch {
+      // The name is only a convenience; it is just not remembered.
+    }
+  }, [myName]);
+
+  useEffect(() => {
+    // Lines are inserted by start time, so what is new is found by key, not by position.
+    const fresh = segments.filter((segment) => !checked.current.has(`${segment.source}-${segment.start_secs}`));
+    checked.current = new Set(segments.map((segment) => `${segment.source}-${segment.start_secs}`));
+    if (status !== "recording") return;
+    const said = fresh.filter((segment) => segment.source === "system" && mentions(segment.text, myNames)).at(-1);
+    if (said) {
+      setMention(said);
+      beep();
+    }
+  }, [segments]);
+
+  useEffect(() => setMention(null), [meetingId]);
 
   const [recapMinutes, setRecapMinutes] = useState(5);
   const [recap, setRecap] = useState<"loading" | { text: string; ok: boolean } | null>(null);
@@ -136,6 +188,14 @@ export function App() {
             </option>
           ))}
         </select>
+        <input
+          value={myName}
+          onChange={(event) => setMyName(event.target.value)}
+          placeholder="Nama saya"
+          title="Nama yang Anda pakai di rapat; pisahkan dengan koma. Anda diberi tahu saat ada yang menyebutnya."
+          aria-label="Nama saya"
+          className="w-28 rounded-md border border-zinc-300 px-2 py-1.5 text-sm outline-none focus:border-zinc-500"
+        />
         <select
           value={recapMinutes}
           onChange={(event) => setRecapMinutes(Number(event.target.value))}
@@ -197,6 +257,26 @@ export function App() {
         </button>
       </header>
 
+      {mention && (
+        <section role="alert" className="flex items-start gap-3 border-b border-amber-300 bg-amber-50 px-5 py-3 text-sm text-amber-950">
+          <p className="min-w-0 flex-1 leading-relaxed">
+            <strong>Nama Anda disebut</strong> pukul {formatClock(mention.start_secs)}: “{mention.text}”
+          </p>
+          <button
+            onClick={() => {
+              setMention(null);
+              void runCatchUp();
+            }}
+            className="rounded-md border border-amber-400 px-2 py-0.5 hover:bg-amber-100"
+          >
+            Susul saya
+          </button>
+          <button onClick={() => setMention(null)} className="text-amber-800 hover:text-amber-950">
+            Tutup
+          </button>
+        </section>
+      )}
+
       {status === "recording" && brief && (
         <details open className="border-b border-indigo-200 bg-indigo-50 px-5 py-2 text-sm text-indigo-950">
           <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-indigo-700">
@@ -240,6 +320,7 @@ export function App() {
             segments={segments}
             status={status}
             names={names}
+            highlight={myNames}
             onRename={rename}
             onBookmark={(segment) => report(addBookmark(segment.text.slice(0, 80), segment.start_secs))}
           />
@@ -287,11 +368,13 @@ interface TranscriptProps {
   segments: Segment[];
   status: Status;
   names: SpeakerNames;
+  /** Lines from others that say one of these names are marked. */
+  highlight: string[];
   onRename: (speaker: number, name: string) => void;
   onBookmark: (segment: Segment) => void;
 }
 
-function Transcript({ segments, status, names, onRename, onBookmark }: TranscriptProps) {
+function Transcript({ segments, status, names, highlight, onRename, onBookmark }: TranscriptProps) {
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
@@ -335,7 +418,13 @@ function Transcript({ segments, status, names, onRename, onBookmark }: Transcrip
               {speakerLabel(segment, names)}
             </span>
             <div>
-              <p className="leading-relaxed">{segment.text}</p>
+              <p
+                className={`leading-relaxed ${
+                  segment.source === "system" && mentions(segment.text, highlight) ? "rounded bg-amber-100 px-1" : ""
+                }`}
+              >
+                {segment.text}
+              </p>
               {explanations[segment.start_secs] && (
                 <p
                   className={`mt-1 whitespace-pre-wrap rounded-md border px-3 py-2 leading-relaxed ${
@@ -375,7 +464,7 @@ function Transcript({ segments, status, names, onRename, onBookmark }: Transcrip
 }
 
 /** Shown once the final diarization has numbered the speakers. */
-function SpeakerNamesForm({ segments, names, onRename }: Omit<TranscriptProps, "status" | "onBookmark">) {
+function SpeakerNamesForm({ segments, names, onRename }: Omit<TranscriptProps, "status" | "highlight" | "onBookmark">) {
   const speakers = [...new Set(segments.flatMap((segment) => segment.speaker ?? []))].sort((a, b) => a - b);
   if (speakers.length === 0) return null;
 
