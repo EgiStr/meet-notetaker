@@ -7,7 +7,7 @@ import { MomPanel } from "./MomPanel";
 import { ModelPicker, Models } from "./Models";
 import { mentions, parseNames } from "./mentions";
 import { useModels } from "./providers";
-import { notifyAway, quitApp, useAutostart, useMeetingDetected, useTray } from "./tray";
+import { notifyAway, quitApp, useAutostart, useMeetingDetected, useShowSummary, useTray } from "./tray";
 import {
   TEMPLATES,
   catchUp,
@@ -127,7 +127,34 @@ export function App() {
 
   /** An online meeting that opened while nothing is being recorded. */
   const [detected, setDetected] = useState<string | null>(null);
-  useMeetingDetected(setDetected);
+  const [autoRecord, setAutoRecord] = useState(() => {
+    try {
+      return localStorage.getItem("autoRecord") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("autoRecord", autoRecord ? "1" : "0");
+    } catch {
+      // Only the setting is not remembered.
+    }
+  }, [autoRecord]);
+  useMeetingDetected((name) => {
+    if (status !== "idle") return;
+    if (autoRecord) {
+      void start(title, template);
+      notifyAway(`Merekam rapat ${name}`, "Tekan Ctrl+Alt+R untuk berhenti.");
+    } else {
+      setDetected(name);
+      notifyAway(`${name} terdeteksi`, "Tekan Ctrl+Alt+R atau pilih Mulai merekam di ikon tray.");
+    }
+  });
+  useShowSummary(() => {
+    setView("meeting");
+    setPanel("summary");
+  });
   useEffect(() => {
     if (status !== "idle") setDetected(null);
   }, [status]);
@@ -355,6 +382,10 @@ export function App() {
             <MenuItem onClick={() => void draftEmail()} disabled={status !== "idle" || !hasMeeting || email === "loading"}>
               Tulis email tindak lanjut
             </MenuItem>
+            <label className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-sm">
+              <input type="checkbox" checked={autoRecord} onChange={(event) => setAutoRecord(event.target.checked)} />
+              Rekam otomatis saat rapat terdeteksi
+            </label>
             <p className="px-2 py-1.5 text-xs text-zinc-500">
               Pintasan global: <kbd className="rounded border border-zinc-300 bg-zinc-50 px-1">Ctrl+Alt+R</kbd> mulai atau
               berhenti merekam dari aplikasi mana pun.

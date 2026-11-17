@@ -63,3 +63,13 @@ export function notifyAway(title: string, body: string) {
     // A missed notification is not worth an error.
   });
 }
+
+/** The window was brought forward after a "minutes are ready" notification. */
+export function useShowSummary(onShow: () => void) {
+  const latest = useRef(onShow);
+  latest.current = onShow;
+  useEffect(() => {
+    const stop = listen("show-summary", () => latest.current());
+    return () => void stop.then((unlisten) => unlisten());
+  }, []);
+}

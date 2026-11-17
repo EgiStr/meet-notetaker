@@ -14,7 +14,7 @@ Dibangun dengan Rust (Tauri 2) dan React. Desain lengkap ada di [docs/PRD.md](do
 - Label pembicara otomatis (diarization) dan nama pembicara yang bisa diubah.
 - Riwayat rapat (SQLite), pencarian, tanya ke semua rapat, penanda, ekspor Markdown, hapus.
 - Impor rekaman audio yang sudah ada.
-- Pintasan global Ctrl+Alt+R untuk mulai/berhenti merekam, notifikasi Windows saat nama Anda disebut, dan pengingat saat rapat Google Meet, Zoom, atau Teams terbuka.
+- Pintasan global Ctrl+Alt+R untuk mulai/berhenti merekam, notifikasi Windows saat nama Anda disebut, pengingat (atau rekam otomatis, bila diaktifkan di menu ⋯) saat rapat Google Meet, Zoom, atau Teams terbuka, dan notifikasi ringkasan setelah rapat selesai.
 - Transkripsi: layanan yang kompatibel dengan OpenAI (mis. Groq), Deepgram, atau Whisper lokal.
 - Berjalan di latar belakang: menutup jendela hanya menyembunyikannya ke system tray (rekaman tetap jalan). Menu tray: buka, mulai/berhenti merekam, keluar. Bisa dijalankan otomatis saat Windows mulai lewat menu ⋯.
 - Model AI bebas dipilih: tambah penyedia dan model di layar **Model**.

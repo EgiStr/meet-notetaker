@@ -1,7 +1,8 @@
 //! What makes the app useful while the window is hidden: a global hotkey to start and stop the
 //! recording, desktop notifications, and noticing that an online meeting has opened.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -51,6 +52,26 @@ pub fn notify(title: String, body: String, app: AppHandle) -> Result<(), String>
     app.notification().builder().title(title).body(body).show().map_err(|error| error.to_string())
 }
 
+/// Set when the user was told that minutes are ready; the next time the window is brought
+/// forward it shows them. Windows does not report a click on a notification of an app like this,
+/// so opening the app from the tray is what counts as the click.
+static SUMMARY_ANNOUNCED_AT: AtomicU64 = AtomicU64::new(0);
+/// An older notification is no longer what the user is coming back for.
+const SUMMARY_FRESH_SECS: u64 = 30 * 60;
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
+}
+const SHOW_SUMMARY_EVENT: &str = "show-summary";
+
+/// Asks the window to show the minutes if a notification about them is still unanswered.
+pub fn show_waiting_summary(app: &AppHandle) {
+    let announced = SUMMARY_ANNOUNCED_AT.swap(0, Ordering::SeqCst);
+    if announced != 0 && now_secs().saturating_sub(announced) <= SUMMARY_FRESH_SECS {
+        let _ = app.emit(SHOW_SUMMARY_EVENT, ());
+    }
+}
+
 const PREVIEW_CHARS: usize = 180;
 
 /// The first lines of the minutes without markdown, short enough for a notification.
@@ -83,6 +104,7 @@ pub fn announce_summary(app: &AppHandle, title: &str, mom: &str) {
     if in_front || preview.is_empty() {
         return;
     }
+    SUMMARY_ANNOUNCED_AT.store(now_secs(), Ordering::SeqCst);
     let _ = app.notification().builder().title(format!("Ringkasan siap: {title}")).body(preview).show();
 }
 
@@ -132,13 +154,8 @@ fn watch_for_meetings(app: &AppHandle) {
                 let recording = app.state::<Meeting>().state().session.is_some();
                 if !announced && !recording {
                     announced = true;
+                    // The window decides what to do: ask, or start recording on its own.
                     let _ = app.emit(MEETING_EVENT, name);
-                    let _ = app
-                        .notification()
-                        .builder()
-                        .title(format!("{name} terdeteksi"))
-                        .body(format!("Tekan {HOTKEY_LABEL} atau pilih Mulai merekam di ikon tray untuk mencatat rapat ini."))
-                        .show();
                 }
             }
             None => {

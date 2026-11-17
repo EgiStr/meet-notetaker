@@ -65,6 +65,7 @@ pub fn show_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+    crate::desktop::show_waiting_summary(app);
 }
 
 /// Makes the tray menu and tooltip say whether a recording is running.
