@@ -15,6 +15,7 @@ Dibangun dengan Rust (Tauri 2) dan React. Desain lengkap ada di [docs/PRD.md](do
 - Riwayat rapat (SQLite), pencarian, tanya ke semua rapat, penanda, ekspor Markdown, hapus.
 - Impor rekaman audio yang sudah ada.
 - Transkripsi: layanan yang kompatibel dengan OpenAI (mis. Groq), Deepgram, atau Whisper lokal.
+- Berjalan di latar belakang: menutup jendela hanya menyembunyikannya ke system tray (rekaman tetap jalan). Menu tray: buka, mulai/berhenti merekam, keluar. Bisa dijalankan otomatis saat Windows mulai lewat menu ⋯.
 - Model AI bebas dipilih: tambah penyedia dan model di layar **Model**.
 
 ## Model AI

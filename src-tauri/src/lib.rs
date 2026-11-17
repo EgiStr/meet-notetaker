@@ -25,6 +25,7 @@ use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod models;
+mod tray;
 
 const SESSION_EVENT: &str = "session-event";
 const NOTES_EVENT: &str = "notes-event";
@@ -716,12 +717,21 @@ fn env_or(name: &str, default: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![tray::MINIMIZED_ARG])))
         .manage(Meeting::default())
+        // Closing the window hides it; the app keeps running in the tray until it is quit from there.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             app.manage(Db(Mutex::new(Store::open(&data_dir.join("meetings.db"))?)));
             index_in_background(app.handle());
+            tray::setup(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -732,6 +742,10 @@ pub fn run() {
             rename_speaker,
             ask,
             list_meetings,
+            tray::set_tray_recording,
+            tray::quit_app,
+            tray::get_autostart,
+            tray::set_autostart,
             search_history,
             import_recording,
             open_meeting,

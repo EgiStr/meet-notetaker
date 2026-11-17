@@ -6,17 +6,16 @@ interface Props {
   pending: string | null;
   /** Retrying by hand only makes sense once the periodic updates have stopped. */
   canRetry: boolean;
+  /** What is being discussed right now, while recording. */
+  brief?: string;
 }
 
-export function MomPanel({ mom, pending, canRetry }: Props) {
+export function MomPanel({ mom, pending, canRetry, brief }: Props) {
   return (
-    <section className="flex min-h-0 flex-col border-r border-zinc-200 bg-white">
-      <h2 className="border-b border-zinc-200 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-        MoM
-      </h2>
+    <section className="flex min-h-0 flex-1 flex-col">
       {pending && (
         <p role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
-          MoM tertunda: {pending}{" "}
+          Ringkasan tertunda: {pending}{" "}
           {canRetry && (
             <button onClick={() => void rebuildMom()} className="font-medium underline">
               Coba lagi
@@ -24,11 +23,17 @@ export function MomPanel({ mom, pending, canRetry }: Props) {
           )}
         </p>
       )}
-      <div className="flex-1 overflow-y-auto px-4 py-3 text-sm">
+      <div className="flex-1 overflow-y-auto px-4 py-4 text-sm">
+        {brief && (
+          <div className="mb-4 rounded-lg bg-indigo-50 px-3 py-2 text-indigo-950">
+            <p className="mb-1 text-xs font-medium text-indigo-700">Sedang dibahas</p>
+            <p className="whitespace-pre-wrap leading-relaxed">{brief}</p>
+          </div>
+        )}
         {mom ? (
           <Markdown text={mom} />
         ) : (
-          <p className="text-zinc-500">MoM muncul kira-kira dua menit setelah rekaman dimulai.</p>
+          <p className="text-zinc-500">Ringkasan muncul kira-kira dua menit setelah rekaman dimulai.</p>
         )}
       </div>
     </section>

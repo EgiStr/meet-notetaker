@@ -9,30 +9,37 @@ interface Exchange {
   failed?: boolean;
 }
 
-interface Props {
+interface NotesProps {
   enabled: boolean;
   /** What a meeting opened from the history already has. */
   savedNotes: string;
-  savedChat: Exchange[];
   bookmarks: Bookmark[];
   onRemoveBookmark: (index: number) => void;
+}
+
+/** The user's own notes and the bookmarks. Remount (change `key`) to show another meeting. */
+export function NotesPanel(props: NotesProps) {
+  return (
+    <section className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <UserNotes enabled={props.enabled} saved={props.savedNotes} />
+      <Bookmarks bookmarks={props.bookmarks} onRemove={props.onRemoveBookmark} />
+    </section>
+  );
+}
+
+interface AskProps {
+  enabled: boolean;
+  savedChat: Exchange[];
   /** Questions worth asking, refreshed by the core while recording. */
   suggestions: string[];
   onSuggestions: (questions: string[]) => void;
 }
 
-/** The user's own notes and on-demand questions about the meeting. Remount (change `key`) to show another meeting. */
-export function AskPanel(props: Props) {
+/** On-demand questions about the meeting. Remount (change `key`) to show another meeting. */
+export function AskPanel(props: AskProps) {
   return (
-    <section className="flex min-h-0 flex-col bg-white">
-      <UserNotes enabled={props.enabled} saved={props.savedNotes} />
-      <Bookmarks bookmarks={props.bookmarks} onRemove={props.onRemoveBookmark} />
-      <Questions
-        enabled={props.enabled}
-        saved={props.savedChat}
-        suggestions={props.suggestions}
-        onSuggestions={props.onSuggestions}
-      />
+    <section className="flex min-h-0 flex-1 flex-col">
+      <Questions enabled={props.enabled} saved={props.savedChat} suggestions={props.suggestions} onSuggestions={props.onSuggestions} />
     </section>
   );
 }
@@ -64,14 +71,13 @@ function UserNotes({ enabled, saved }: { enabled: boolean; saved: string }) {
   }
 
   return (
-    <div className="flex flex-col border-b border-zinc-200">
-      <PanelTitle>Catatan saya</PanelTitle>
+    <div className="flex flex-col">
       <textarea
         value={text}
         onChange={(event) => change(event.target.value)}
         disabled={!enabled}
-        rows={5}
-        placeholder={enabled ? "Hal yang penting bagi Anda. Ikut dipakai saat MoM disusun." : "Tersedia setelah rekaman dimulai."}
+        rows={8}
+        placeholder={enabled ? "Catatan pribadi. Ikut dipakai saat ringkasan disusun." : "Tersedia setelah rekaman dimulai."}
         className="resize-none px-4 py-3 text-sm outline-none placeholder:text-zinc-400 disabled:bg-zinc-50"
       />
       <div className="px-4 pb-2">
@@ -113,8 +119,8 @@ function UserNotes({ enabled, saved }: { enabled: boolean; saved: string }) {
 function Bookmarks({ bookmarks, onRemove }: { bookmarks: Bookmark[]; onRemove: (index: number) => void }) {
   if (bookmarks.length === 0) return null;
   return (
-    <div className="border-b border-zinc-200">
-      <PanelTitle>Penanda</PanelTitle>
+    <div className="border-t border-zinc-200">
+      <h3 className="px-4 pt-3 text-xs font-medium text-zinc-500">Penanda</h3>
       <ul className="max-h-28 overflow-y-auto px-4 py-2 text-sm">
         {bookmarks.map((bookmark, index) => (
           <li key={`${bookmark.at_secs}-${index}`} className="flex items-baseline gap-2">
@@ -176,9 +182,8 @@ function Questions({ enabled, saved, suggestions, onSuggestions }: QuestionsProp
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <PanelTitle>Tanya</PanelTitle>
       <ol className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-3 text-sm">
-        {exchanges.length === 0 && <li className="text-zinc-500">Tanyakan apa saja tentang isi rapat ini.</li>}
+        {exchanges.length === 0 && <li className="text-zinc-500">Tanyakan apa saja tentang rapat ini.</li>}
         {exchanges.map((exchange, index) => (
           <li key={index}>
             <p className="font-medium">{exchange.question}</p>
@@ -188,17 +193,14 @@ function Questions({ enabled, saved, suggestions, onSuggestions }: QuestionsProp
           </li>
         ))}
       </ol>
-      <div className="flex flex-col gap-1 border-t border-zinc-200 px-3 pt-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Saran pertanyaan</span>
-          <button
-            onClick={() => void suggest()}
-            disabled={!enabled || suggesting}
-            className="rounded-md border border-zinc-300 px-2 py-0.5 text-xs hover:bg-zinc-50 disabled:opacity-50"
-          >
-            {suggesting ? "Mencari…" : "Saran"}
-          </button>
-        </div>
+      <div className="flex flex-col gap-1 px-3 pt-2">
+        <button
+          onClick={() => void suggest()}
+          disabled={!enabled || suggesting}
+          className="self-start text-xs text-zinc-500 hover:text-zinc-900 disabled:opacity-50"
+        >
+          {suggesting ? "Mencari saran…" : "Beri saran pertanyaan"}
+        </button>
         {suggestions.map((question) => (
           <button
             key={question}
@@ -226,13 +228,5 @@ function Questions({ enabled, saved, suggestions, onSuggestions }: QuestionsProp
         </button>
       </form>
     </div>
-  );
-}
-
-function PanelTitle({ children }: { children: string }) {
-  return (
-    <h2 className="border-b border-zinc-200 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-      {children}
-    </h2>
   );
 }

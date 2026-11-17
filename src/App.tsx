@@ -1,11 +1,12 @@
-import { save } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState } from "react";
-import { AskPanel } from "./AskPanel";
+import { confirm, save } from "@tauri-apps/plugin-dialog";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { AskPanel, NotesPanel } from "./AskPanel";
 import { History } from "./History";
 import { MomPanel } from "./MomPanel";
 import { ModelPicker, Models } from "./Models";
 import { mentions, parseNames } from "./mentions";
 import { useModels } from "./providers";
+import { quitApp, useAutostart, useTray } from "./tray";
 import {
   TEMPLATES,
   catchUp,
@@ -47,10 +48,21 @@ function beep() {
   }
 }
 
-const SPEAKER_COLOR:Record<Source, string> = {
-  microphone: "text-sky-700",
-  system: "text-amber-700",
+const SPEAKER_COLOR: Record<Source, string> = {
+  microphone: "text-indigo-700",
+  system: "text-zinc-700",
 };
+
+type View = "meeting" | "history" | "models";
+type Panel = "summary" | "ask" | "notes";
+
+const PANELS: { id: Panel; label: string }[] = [
+  { id: "summary", label: "Ringkasan" },
+  { id: "ask", label: "Tanya" },
+  { id: "notes", label: "Catatan" },
+];
+
+const BUTTON = "rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50";
 
 export function App() {
   const { status, segments, error, meetingId, names, opened, start, stop, open, rename, importFile, clear } =
@@ -62,11 +74,32 @@ export function App() {
   const [title, setTitle] = useState("");
   useAutoTitle(setTitle);
   const [template, setTemplate] = useState("general");
-  const [showHistory, setShowHistory] = useState(false);
-  const [showModels, setShowModels] = useState(false);
+  const [view, setView] = useState<View>("meeting");
+  const [panel, setPanel] = useState<Panel>("summary");
   const modelSettings = useModels();
+  const autostart = useAutostart();
   /** The outcome of the last action that is not part of recording, shown like `error`. */
   const [notice, setNotice] = useState<string | null>(null);
+
+  useTray({
+    recording: status === "recording",
+    onToggleRecording: () => {
+      if (status === "idle") void start(title, template);
+      else if (status === "recording") void stop();
+    },
+    onQuit: async () => {
+      if (status === "stopping" || status === "importing") {
+        setNotice("Tunggu sampai prosesnya selesai sebelum keluar.");
+        return;
+      }
+      if (status === "recording") {
+        const sure = await confirm("Rekaman masih berjalan. Hentikan dan keluar?", { title: "Keluar", kind: "warning" });
+        if (!sure) return;
+        await stop();
+      }
+      await quitApp();
+    },
+  });
 
   useEffect(() => {
     if (opened) {
@@ -112,10 +145,11 @@ export function App() {
   const [recapMinutes, setRecapMinutes] = useState(5);
   const [recap, setRecap] = useState<"loading" | { text: string; ok: boolean } | null>(null);
 
-  async function runCatchUp() {
+  async function runCatchUp(minutes = recapMinutes) {
+    setRecapMinutes(minutes);
     setRecap("loading");
     try {
-      setRecap({ text: (await catchUp(recapMinutes)) ?? "Belum ada ucapan untuk diringkas.", ok: true });
+      setRecap({ text: (await catchUp(minutes)) ?? "Belum ada ucapan untuk diringkas.", ok: true });
     } catch (reason) {
       setRecap({ text: String(reason), ok: false });
     }
@@ -158,20 +192,22 @@ export function App() {
   }
 
   async function importRecording() {
-    setShowHistory(false);
+    setView("meeting");
     const name = await importFile();
     if (name) setTitle(name);
   }
 
   async function openFromHistory(id: number) {
     await open(id);
-    setShowHistory(false);
+    setView("meeting");
   }
   const elapsed = useElapsedSeconds(status === "recording");
+  const busy = status === "stopping" || status === "importing";
+  const hasMeeting = meetingId > 0 && segments.length > 0;
 
   return (
     <div className="flex h-full flex-col bg-zinc-50 text-zinc-900">
-      <header className="flex items-center gap-4 border-b border-zinc-200 bg-white px-5 py-3">
+      <header className="flex items-center gap-3 border-b border-zinc-200 bg-white px-4 py-2.5">
         <RecordButton status={status} onStart={() => void start(title, template)} onStop={stop} />
         <input
           value={title}
@@ -179,108 +215,104 @@ export function App() {
           disabled={status !== "idle"}
           placeholder="Judul rapat"
           aria-label="Judul rapat"
-          className="w-56 rounded-md border border-zinc-300 px-3 py-1.5 text-sm outline-none focus:border-zinc-500 disabled:bg-zinc-50"
+          className="min-w-0 max-w-sm flex-1 rounded-md border border-transparent px-2 py-1.5 text-sm font-medium outline-none hover:border-zinc-200 focus:border-zinc-400 disabled:bg-transparent"
         />
-        <span className="font-mono text-sm tabular-nums text-zinc-600">{formatClock(elapsed)}</span>
         {status === "recording" && (
-          <span className="text-sm text-zinc-600">Merekam mikrofon dan audio sistem. Beri tahu peserta lain.</span>
+          <span className="flex items-center gap-2 text-sm text-zinc-600">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-red-600" aria-hidden />
+            <span className="font-mono tabular-nums">{formatClock(elapsed)}</span>
+          </span>
         )}
-        {status === "stopping" && <span className="text-sm text-zinc-600">Menyelesaikan transkripsi, label pembicara, dan MoM akhir…</span>}
-        {status === "importing" && (
-          <span className="text-sm text-zinc-600">Mengimpor: transkripsi, label pembicara, lalu MoM…</span>
-        )}
-        <select
-          value={template}
-          onChange={(event) => changeTemplate(event.target.value)}
-          disabled={status === "stopping" || status === "importing"}
-          aria-label="Template MoM"
-          className="rounded-md border border-zinc-300 px-2 py-1.5 text-sm"
-        >
-          {TEMPLATES.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-        <input
-          value={myName}
-          onChange={(event) => setMyName(event.target.value)}
-          placeholder="Nama saya"
-          title="Nama yang Anda pakai di rapat; pisahkan dengan koma. Anda diberi tahu saat ada yang menyebutnya."
-          aria-label="Nama saya"
-          className="w-28 rounded-md border border-zinc-300 px-2 py-1.5 text-sm outline-none focus:border-zinc-500"
-        />
-        <select
-          value={recapMinutes}
-          onChange={(event) => setRecapMinutes(Number(event.target.value))}
-          aria-label="Rentang untuk Susul saya"
-          className="rounded-md border border-zinc-300 px-2 py-1.5 text-sm"
-        >
-          {[3, 5, 10, 30].map((minutes) => (
-            <option key={minutes} value={minutes}>
-              {minutes} menit
-            </option>
-          ))}
-        </select>
-        <button
-          onClick={() => void runCatchUp()}
-          disabled={meetingId === 0 || segments.length === 0 || recap === "loading"}
-          title="Ringkas apa yang baru saja dibahas, supaya langsung paham"
-          className="rounded-md bg-indigo-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-800 disabled:opacity-50"
-        >
-          Susul saya
-        </button>
-        {status === "recording" && (
-          <button onClick={markNow} className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50">
-            Tandai
-          </button>
-        )}
-        <button
-          onClick={() => void draftEmail()}
-          disabled={status !== "idle" || meetingId === 0 || segments.length === 0 || email === "loading"}
-          title="Tulis draf email tindak lanjut untuk peserta"
-          className="ml-auto rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
-        >
-          Draf email
-        </button>
-        <button
-          onClick={() => void exportToFile()}
-          disabled={status !== "idle" || meetingId === 0}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
-        >
-          Ekspor
-        </button>
-        <button
-          onClick={() => void importRecording()}
-          disabled={status !== "idle"}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
-        >
-          Impor
-        </button>
-        <ModelPicker models={modelSettings.models} apply={modelSettings.apply} />
-        <button
-          onClick={() => {
-            setShowModels((shown) => !shown);
-            setShowHistory(false);
-          }}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50"
-        >
-          {showModels ? "Kembali" : "Model"}
-        </button>
-        <button
-          onClick={() => {
-            setShowHistory((shown) => !shown);
-            setShowModels(false);
-          }}
-          disabled={status !== "idle"}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
-        >
-          {showHistory ? "Kembali" : "Riwayat"}
-        </button>
+        {status === "stopping" && <span className="text-sm text-zinc-500">Menyelesaikan…</span>}
+        {status === "importing" && <span className="text-sm text-zinc-500">Mengimpor…</span>}
+
+        <div className="ml-auto flex items-center gap-2">
+          {status === "recording" && (
+            <button onClick={markNow} className={BUTTON} title="Tandai momen ini">
+              Tandai
+            </button>
+          )}
+          {hasMeeting && (
+            <button
+              onClick={() => void runCatchUp()}
+              disabled={recap === "loading"}
+              title="Ringkas apa yang baru saja dibahas"
+              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              Susul saya
+            </button>
+          )}
+          <nav className="flex rounded-md bg-zinc-100 p-0.5 text-sm" aria-label="Tampilan">
+            <NavButton active={view === "meeting"} onClick={() => setView("meeting")}>
+              Rapat
+            </NavButton>
+            <NavButton active={view === "history"} disabled={status !== "idle"} onClick={() => setView("history")}>
+              Riwayat
+            </NavButton>
+          </nav>
+          <Menu>
+            <label className="flex flex-col gap-1 px-2 py-1.5 text-xs text-zinc-500">
+              Jenis rapat
+              <select
+                value={template}
+                onChange={(event) => changeTemplate(event.target.value)}
+                disabled={busy}
+                className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900"
+              >
+                {TEMPLATES.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 px-2 py-1.5 text-xs text-zinc-500">
+              Nama saya (beri tahu saat disebut)
+              <input
+                value={myName}
+                onChange={(event) => setMyName(event.target.value)}
+                placeholder="Pisahkan dengan koma"
+                className="rounded-md border border-zinc-300 px-2 py-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-500"
+              />
+            </label>
+            <div className="flex flex-col gap-1 px-2 py-1.5 text-xs text-zinc-500">
+              Model AI
+              <div className="flex items-center gap-2">
+                <ModelPicker models={modelSettings.models} apply={modelSettings.apply} />
+                <button onClick={() => setView("models")} className="text-sm text-indigo-700 hover:underline">
+                  Kelola
+                </button>
+              </div>
+            </div>
+            <hr className="my-1 border-zinc-200" />
+            <MenuItem onClick={() => void importRecording()} disabled={status !== "idle"}>
+              Impor rekaman…
+            </MenuItem>
+            <MenuItem onClick={() => void exportToFile()} disabled={status !== "idle" || meetingId === 0}>
+              Ekspor sebagai Markdown…
+            </MenuItem>
+            <MenuItem onClick={() => void draftEmail()} disabled={status !== "idle" || !hasMeeting || email === "loading"}>
+              Tulis email tindak lanjut
+            </MenuItem>
+            {autostart.enabled !== null && (
+              <>
+                <hr className="my-1 border-zinc-200" />
+                <label className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={autostart.enabled}
+                    onChange={(event) => report(autostart.change(event.target.checked))}
+                  />
+                  Jalankan di latar belakang saat Windows mulai
+                </label>
+              </>
+            )}
+          </Menu>
+        </div>
       </header>
 
       {mention && (
-        <section role="alert" className="flex items-start gap-3 border-b border-amber-300 bg-amber-50 px-5 py-3 text-sm text-amber-950">
+        <section role="alert" className="flex items-start gap-3 border-b border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-950">
           <p className="min-w-0 flex-1 leading-relaxed">
             <strong>Nama Anda disebut</strong> pukul {formatClock(mention.start_secs)}: “{mention.text}”
           </p>
@@ -299,20 +331,21 @@ export function App() {
         </section>
       )}
 
-      {status === "recording" && brief && (
-        <details open className="border-b border-indigo-200 bg-indigo-50 px-5 py-2 text-sm text-indigo-950">
-          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-indigo-700">
-            Sekarang · diperbarui otomatis tiap menit
-          </summary>
-          <p className="mt-1 whitespace-pre-wrap leading-relaxed">{brief}</p>
-        </details>
-      )}
-
       {recap && (
-        <section className="flex items-start gap-3 border-b border-indigo-200 bg-indigo-50 px-5 py-3 text-sm text-indigo-950">
+        <section className="flex items-start gap-3 border-b border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950">
           <div className="min-w-0 flex-1">
-            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-indigo-700">
-              Susul saya · {recapMinutes} menit terakhir
+            <p className="mb-1 flex items-center gap-1 text-xs text-indigo-700">
+              Susul saya ·
+              {[3, 5, 10, 30].map((minutes) => (
+                <button
+                  key={minutes}
+                  onClick={() => void runCatchUp(minutes)}
+                  disabled={recap === "loading"}
+                  className={`rounded px-1.5 py-0.5 ${minutes === recapMinutes ? "bg-indigo-600 text-white" : "hover:bg-indigo-100"}`}
+                >
+                  {minutes} menit
+                </button>
+              ))}
             </p>
             {recap === "loading" ? (
               <p>Membaca percakapan…</p>
@@ -327,9 +360,9 @@ export function App() {
       )}
 
       {email && (
-        <section className="flex items-start gap-3 border-b border-zinc-200 bg-zinc-50 px-5 py-3 text-sm">
+        <section className="flex items-start gap-3 border-b border-zinc-200 bg-white px-4 py-3 text-sm">
           <div className="min-w-0 flex-1">
-            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">Draf email tindak lanjut</p>
+            <p className="mb-1 text-xs text-zinc-500">Email tindak lanjut</p>
             {email === "loading" ? (
               <p>Menulis draf…</p>
             ) : (
@@ -353,17 +386,17 @@ export function App() {
       )}
 
       {(error ?? notice) && (
-        <p role="alert" className="border-b border-red-200 bg-red-50 px-5 py-2 text-sm text-red-800">
+        <p role="alert" className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
           {error ?? notice}
         </p>
       )}
 
-      {showModels ? (
+      {view === "models" ? (
         <Models models={modelSettings.models} error={modelSettings.error} apply={modelSettings.apply} />
-      ) : showHistory ? (
+      ) : view === "history" ? (
         <History onOpen={(id) => void openFromHistory(id)} onDeletedCurrent={clear} />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-[1fr_1fr_18rem]">
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_24rem]">
           <Transcript
             segments={segments}
             status={status}
@@ -371,21 +404,120 @@ export function App() {
             highlight={myNames}
             onRename={rename}
             onBookmark={(segment) => report(addBookmark(segment.text.slice(0, 80), segment.start_secs))}
+            onStart={() => void start(title, template)}
+            onImport={() => void importRecording()}
           />
-          <MomPanel mom={mom} pending={pending} canRetry={status === "idle"} />
-          <AskPanel
-            key={meetingId}
-            enabled={meetingId > 0}
-            savedNotes={opened?.userNotes ?? ""}
-            savedChat={opened?.chat ?? []}
-            bookmarks={bookmarks}
-            onRemoveBookmark={(index) => report(removeBookmark(index))}
-            suggestions={questions}
-            onSuggestions={setQuestions}
-          />
+          <aside className="flex min-h-0 flex-col border-l border-zinc-200 bg-white">
+            <div role="tablist" className="flex gap-4 border-b border-zinc-200 px-4">
+              {PANELS.map((option) => (
+                <button
+                  key={option.id}
+                  role="tab"
+                  aria-selected={panel === option.id}
+                  onClick={() => setPanel(option.id)}
+                  className={`-mb-px border-b-2 py-2.5 text-sm ${
+                    panel === option.id ? "border-zinc-900 font-medium" : "border-transparent text-zinc-500 hover:text-zinc-900"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            {panel === "summary" && (
+              <MomPanel mom={mom} pending={pending} canRetry={status === "idle"} brief={status === "recording" ? brief : undefined} />
+            )}
+            {panel === "ask" && (
+              <AskPanel
+                key={meetingId}
+                enabled={meetingId > 0}
+                savedChat={opened?.chat ?? []}
+                suggestions={questions}
+                onSuggestions={setQuestions}
+              />
+            )}
+            {panel === "notes" && (
+              <NotesPanel
+                key={meetingId}
+                enabled={meetingId > 0}
+                savedNotes={opened?.userNotes ?? ""}
+                bookmarks={bookmarks}
+                onRemoveBookmark={(index) => report(removeBookmark(index))}
+              />
+            )}
+          </aside>
         </div>
       )}
     </div>
+  );
+}
+
+function NavButton(props: { active: boolean; disabled?: boolean; onClick: () => void; children: string }) {
+  return (
+    <button
+      onClick={props.onClick}
+      disabled={props.disabled}
+      aria-current={props.active ? "page" : undefined}
+      className={`rounded px-3 py-1 disabled:opacity-50 ${props.active ? "bg-white font-medium shadow-sm" : "text-zinc-600 hover:text-zinc-900"}`}
+    >
+      {props.children}
+    </button>
+  );
+}
+
+/** A "more" button with a panel of the things that are not needed during a meeting. Closes after a click on a button. */
+function Menu({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: MouseEvent) => {
+      if (!box.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
+  return (
+    <div ref={box} className="relative">
+      <button
+        onClick={() => setOpen((shown) => !shown)}
+        aria-label="Pengaturan dan lainnya"
+        aria-expanded={open}
+        className="rounded-md px-2.5 py-1.5 text-lg leading-none text-zinc-600 hover:bg-zinc-100"
+      >
+        ⋯
+      </button>
+      {open && (
+        <div
+          onClick={(event) => {
+            if ((event.target as HTMLElement).closest("button")) setOpen(false);
+          }}
+          className="absolute right-0 top-full z-10 mt-1 flex w-80 flex-col rounded-lg border border-zinc-200 bg-white p-1.5 shadow-lg"
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuItem(props: { onClick: () => void; disabled?: boolean; children: string }) {
+  return (
+    <button
+      onClick={props.onClick}
+      disabled={props.disabled}
+      className="rounded-md px-2 py-1.5 text-left text-sm hover:bg-zinc-100 disabled:opacity-40 disabled:hover:bg-transparent"
+    >
+      {props.children}
+    </button>
   );
 }
 
@@ -395,7 +527,7 @@ function RecordButton(props: { status: Status; onStart: () => void; onStop: () =
       <button
         onClick={props.onStart}
         disabled={props.status === "importing"}
-        className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+        className="rounded-full bg-red-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
       >
         Rekam
       </button>
@@ -405,7 +537,7 @@ function RecordButton(props: { status: Status; onStart: () => void; onStop: () =
     <button
       onClick={props.onStop}
       disabled={props.status === "stopping"}
-      className="rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-900 disabled:opacity-50"
+      className="rounded-full bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white hover:bg-black disabled:opacity-50"
     >
       Berhenti
     </button>
@@ -420,9 +552,11 @@ interface TranscriptProps {
   highlight: string[];
   onRename: (speaker: number, name: string) => void;
   onBookmark: (segment: Segment) => void;
+  onStart: () => void;
+  onImport: () => void;
 }
 
-function Transcript({ segments, status, names, highlight, onRename, onBookmark }: TranscriptProps) {
+function Transcript({ segments, status, names, highlight, onRename, onBookmark, onStart, onImport }: TranscriptProps) {
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
@@ -444,16 +578,31 @@ function Transcript({ segments, status, names, highlight, onRename, onBookmark }
 
   if (segments.length === 0) {
     return (
-      <main className="flex items-center justify-center border-r border-zinc-200 px-5 text-center text-sm text-zinc-500">
-        {status === "idle"
-          ? "Tekan Rekam untuk mulai, atau Impor untuk memproses file rekaman."
-          : "Menunggu ucapan…"}
+      <main className="flex flex-col items-center justify-center gap-3 px-5 text-center">
+        {status === "idle" ? (
+          <>
+            <p className="text-lg font-medium">Siap mencatat rapat Anda</p>
+            <p className="max-w-sm text-sm text-zinc-500">
+              Rekam mikrofon dan suara rapat sekaligus. Transkrip, ringkasan, dan tindak lanjut muncul otomatis.
+            </p>
+            <div className="mt-2 flex items-center gap-3">
+              <button onClick={onStart} className="rounded-full bg-red-600 px-5 py-2 text-sm font-medium text-white hover:bg-red-700">
+                Mulai merekam
+              </button>
+              <button onClick={onImport} className="text-sm text-zinc-600 hover:text-zinc-900">
+                atau impor file rekaman
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-zinc-500">Menunggu ucapan…</p>
+        )}
       </main>
     );
   }
 
   return (
-    <main className="min-h-0 overflow-y-auto border-r border-zinc-200 px-4 py-4">
+    <main className="min-h-0 overflow-y-auto px-5 py-4">
       {status === "idle" && <SpeakerNamesForm segments={segments} names={names} onRename={onRename} />}
       <ol className="mx-auto flex max-w-3xl flex-col gap-3">
         {segments.map((segment) => (
@@ -512,7 +661,11 @@ function Transcript({ segments, status, names, highlight, onRename, onBookmark }
 }
 
 /** Shown once the final diarization has numbered the speakers. */
-function SpeakerNamesForm({ segments, names, onRename }: Omit<TranscriptProps, "status" | "highlight" | "onBookmark">) {
+function SpeakerNamesForm({
+  segments,
+  names,
+  onRename,
+}: Omit<TranscriptProps, "status" | "highlight" | "onBookmark" | "onStart" | "onImport">) {
   const speakers = [...new Set(segments.flatMap((segment) => segment.speaker ?? []))].sort((a, b) => a - b);
   if (speakers.length === 0) return null;
 
