@@ -13,9 +13,10 @@ use notetaker_core::library;
 use notetaker_core::llm::LlmError;
 use notetaker_core::notes::{Bookmark, LiveBrief, MeetingNotes, NotesSnapshot, PeriodicMom};
 use notetaker_core::openai_transcriber::{OpenAiSettings, OpenAiTranscriber};
+use notetaker_core::compress::compress_recordings;
 use notetaker_core::polyvoice_diarizer::PolyvoiceDiarizer;
 use notetaker_core::prompts::MomTemplate;
-use notetaker_core::compress::compress_recordings;
+use notetaker_core::semantic;
 use notetaker_core::session::{recording_path, EventSink, Session, SessionEvent};
 use notetaker_core::speakers::Diarizer;
 use notetaker_core::store::{MeetingSummary, Store};
@@ -33,6 +34,10 @@ const MOM_INTERVAL: Duration = Duration::from_secs(120);
 const BRIEF_INTERVAL: Duration = Duration::from_secs(60);
 const BRIEF_WINDOW_SECS: f64 = 300.0;
 const DEFAULT_TITLE: &str = "Rapat tanpa judul";
+/// Passages found by meaning that go into the answer to a question, and that are listed in the history search.
+const SEMANTIC_QUOTES: usize = 8;
+const SEMANTIC_RESULTS: usize = 30;
+const SNIPPET_CHARS: usize = 220;
 
 /// The meeting database. SQLite connections are used from one thread at a time.
 struct Db(Mutex<Store>);
@@ -250,6 +255,7 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
             if let Some(meeting_id) = untitled_id {
                 auto_title(&app, &notes, meeting_id);
             }
+            index_in_background(&app);
         }
     })
     .await
@@ -304,6 +310,7 @@ fn import_blocking(app: &AppHandle, path: &Path) -> Result<(), String> {
     compress_audio(app, &audio_dir);
     rebuild_and_emit(app, &notes);
     save_meeting(app);
+    index_in_background(app);
     transcribed.map_err(|error| error.to_string())
 }
 
@@ -481,7 +488,12 @@ struct LibraryAnswer {
 #[tauri::command]
 async fn ask_library(question: String, utc_offset_secs: i64, app: AppHandle) -> Result<LibraryAnswer, String> {
     spawn_blocking(move || {
-        let prepared = library::prepare(&app.state::<Db>().store(), &question, utc_offset_secs)
+        // Without embeddings the question is still answered, from the words in it.
+        let passages = models::embedder(&app)
+            .map_err(|error| error.to_string())
+            .and_then(|embedder| semantic::search(&app.state::<Db>().0, &embedder, &question, SEMANTIC_QUOTES).map_err(|error| error.to_string()))
+            .unwrap_or_default();
+        let prepared = library::prepare(&app.state::<Db>().store(), &question, utc_offset_secs, &passages)
             .map_err(|error| error.to_string())?;
         let Some(prepared) = prepared else {
             return Ok(LibraryAnswer { answer: "Belum ada rapat tersimpan yang bisa dicari.".into(), sources: Vec::new() });
@@ -545,6 +557,80 @@ fn delete_meeting(id: i64, app: AppHandle, meeting: State<Meeting>, db: State<Db
         state.audio_dir = None;
     }
     Ok(is_current)
+}
+
+/// Embeds the passages of meetings that were not embedded yet, so that they can be found by
+/// meaning. Failures only mean that search falls back to words, so they are logged, not shown.
+fn index_in_background(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let Ok(embedder) = models::embedder(&app) else {
+            return;
+        };
+        if let Err(error) = semantic::index_pending(&app.state::<Db>().0, &embedder) {
+            eprintln!("pencarian makna: {error}");
+        }
+    });
+}
+
+/// A meeting found by the history search, with the passage that matched by meaning.
+#[derive(serde::Serialize)]
+struct HistoryEntry {
+    meeting: MeetingSummary,
+    snippet: Option<String>,
+    at_secs: Option<f64>,
+}
+
+#[derive(serde::Serialize)]
+struct HistorySearch {
+    entries: Vec<HistoryEntry>,
+    /// Why the search by meaning was left out, when it was.
+    note: Option<String>,
+}
+
+/// Meetings that talk about what `query` means come first, then those that contain its words.
+#[tauri::command]
+async fn search_history(query: String, app: AppHandle) -> Result<HistorySearch, String> {
+    spawn_blocking(move || {
+        let by_words = app.state::<Db>().store().list(&query).map_err(|error| error.to_string())?;
+        let mut entries: Vec<HistoryEntry> = Vec::new();
+        let mut note = None;
+        match models::embedder(&app)
+            .map_err(|error| error.to_string())
+            .and_then(|embedder| semantic::search(&app.state::<Db>().0, &embedder, &query, SEMANTIC_RESULTS).map_err(|error| error.to_string()))
+        {
+            Ok(passages) => {
+                for passage in passages {
+                    if !entries.iter().any(|entry| entry.meeting.id == passage.meeting.id) {
+                        entries.push(HistoryEntry {
+                            meeting: passage.meeting,
+                            snippet: Some(shortened(&passage.text)),
+                            at_secs: Some(passage.start_secs),
+                        });
+                    }
+                }
+            }
+            Err(error) => note = Some(format!("Pencarian makna tidak aktif: {error}")),
+        }
+        for meeting in by_words {
+            if !entries.iter().any(|entry| entry.meeting.id == meeting.id) {
+                entries.push(HistoryEntry { meeting, snippet: None, at_secs: None });
+            }
+        }
+        Ok(HistorySearch { entries, note })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn shortened(text: &str) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(SNIPPET_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{}…", head.trim_end())
+    } else {
+        head
+    }
 }
 
 /// Newest first; `query` filters by title and transcript text.
@@ -635,6 +721,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             app.manage(Db(Mutex::new(Store::open(&data_dir.join("meetings.db"))?)));
+            index_in_background(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -645,6 +732,7 @@ pub fn run() {
             rename_speaker,
             ask,
             list_meetings,
+            search_history,
             import_recording,
             open_meeting,
             set_template,

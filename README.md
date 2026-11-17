@@ -30,6 +30,11 @@ Kunci API disimpan di Windows Credential Manager, bukan di berkas. Daftar penyed
 Selama belum ada model yang dipilih, aplikasi memakai variabel lingkungan `LLM_API_KEY`, `LLM_BASE_URL`
 (bawaan Gemini) dan `LLM_MODEL`.
 
+Riwayat dan pertanyaan lintas rapat mencari berdasarkan makna dengan embedding. Isi `EMBEDDING_API_KEY`
+(alamat bawaan Gemini; ganti dengan `EMBEDDING_BASE_URL`) dan, untuk penyedia selain Gemini dan OpenAI,
+`EMBEDDING_MODEL`. Tanpa `EMBEDDING_API_KEY`, penyedia model yang dipilih dipakai. Tanpa embedding, pencarian
+tetap jalan berdasarkan kata. Rapat diindeks di latar belakang setelah selesai dan saat aplikasi dibuka.
+
 ## Menjalankan
 
 Butuh Rust, Node.js, dan prasyarat Tauri 2 untuk Windows.

@@ -11,6 +11,19 @@ interface MeetingSummary {
   duration_secs: number;
 }
 
+/** A meeting in the list; `snippet` is the passage that matched by meaning, when one did. */
+interface Entry {
+  meeting: MeetingSummary;
+  snippet: string | null;
+  at_secs: number | null;
+}
+
+interface Found {
+  entries: Entry[];
+  /** Why the search by meaning was left out. */
+  note: string | null;
+}
+
 const DATE_FORMAT = new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeStyle: "short" });
 
 interface Props {
@@ -19,22 +32,36 @@ interface Props {
   onDeletedCurrent: () => void;
 }
 
-/** The saved meetings, newest first, filtered by title and transcript text, and questions across all of them. */
+/** The saved meetings, newest first. A search finds them by meaning and by the words of their title and transcript; questions go to all of them. */
 export function History({ onOpen, onDeletedCurrent }: Props) {
   const [query, setQuery] = useState("");
-  const [meetings, setMeetings] = useState<MeetingSummary[] | null>(null);
+  const [found, setFound] = useState<Found | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Bumped after a deletion to list again. */
   const [version, setVersion] = useState(0);
 
   useEffect(() => {
     let current = true;
-    invoke<MeetingSummary[]>("list_meetings", { query }).then(
-      (found) => current && setMeetings(found),
-      (reason) => current && setError(String(reason)),
+    const searching = query.trim() !== "";
+    // A search by meaning calls the provider, so it waits until typing pauses.
+    const timer = setTimeout(
+      () => {
+        const request: Promise<Found> = searching
+          ? invoke<Found>("search_history", { query })
+          : invoke<MeetingSummary[]>("list_meetings", { query: "" }).then((meetings) => ({
+              entries: meetings.map((meeting) => ({ meeting, snippet: null, at_secs: null })),
+              note: null,
+            }));
+        request.then(
+          (result) => current && (setFound(result), setError(null)),
+          (reason) => current && setError(String(reason)),
+        );
+      },
+      searching ? 400 : 0,
     );
     return () => {
       current = false;
+      clearTimeout(timer);
     };
   }, [query, version]);
 
@@ -60,25 +87,31 @@ export function History({ onOpen, onDeletedCurrent }: Props) {
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Cari di judul dan transkrip"
+          placeholder="Cari berdasarkan makna, judul, atau isi transkrip"
           autoFocus
           className="rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
         />
         {error && <p className="text-sm text-red-700">{error}</p>}
-        {meetings?.length === 0 && (
+        {found?.note && <p className="text-xs text-zinc-500">{found.note}</p>}
+        {found?.entries.length === 0 && (
           <p className="text-sm text-zinc-500">{query.trim() ? "Tidak ada rapat yang cocok." : "Belum ada rapat tersimpan."}</p>
         )}
         <ul className="divide-y divide-zinc-200">
-          {meetings?.map((meeting) => (
+          {found?.entries.map(({ meeting, snippet, at_secs }) => (
             <li key={meeting.id} className="flex items-center hover:bg-zinc-50">
-              <button
-                onClick={() => onOpen(meeting.id)}
-                className="flex min-w-0 flex-1 items-baseline justify-between gap-4 px-2 py-3 text-left text-sm"
-              >
-                <span className="truncate font-medium">{meeting.title}</span>
-                <span className="shrink-0 text-zinc-500">
-                  {DATE_FORMAT.format(meeting.started_at * 1000)} · {Math.max(1, Math.round(meeting.duration_secs / 60))} menit
+              <button onClick={() => onOpen(meeting.id)} className="flex min-w-0 flex-1 flex-col gap-1 px-2 py-3 text-left text-sm">
+                <span className="flex items-baseline justify-between gap-4">
+                  <span className="truncate font-medium">{meeting.title}</span>
+                  <span className="shrink-0 text-zinc-500">
+                    {DATE_FORMAT.format(meeting.started_at * 1000)} · {Math.max(1, Math.round(meeting.duration_secs / 60))} menit
+                  </span>
                 </span>
+                {snippet && (
+                  <span className="text-xs leading-relaxed text-zinc-500">
+                    {at_secs !== null && <span className="mr-1 font-mono">{clock(at_secs)}</span>}
+                    {snippet}
+                  </span>
+                )}
               </button>
               <button
                 onClick={() => void remove(meeting)}
@@ -93,6 +126,11 @@ export function History({ onOpen, onDeletedCurrent }: Props) {
       </div>
     </main>
   );
+}
+
+function clock(secs: number): string {
+  const whole = Math.max(0, Math.floor(secs));
+  return `${String(Math.floor(whole / 60)).padStart(2, "0")}:${String(whole % 60).padStart(2, "0")}`;
 }
 
 /** A question to all saved meetings, answered from their minutes and transcripts. */

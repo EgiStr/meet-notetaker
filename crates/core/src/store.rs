@@ -6,6 +6,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::embed::{cosine, from_bytes, to_bytes};
 use crate::notes::{Bookmark, Exchange, NotesSnapshot};
 use crate::prompts::MomTemplate;
 use crate::speakers::SpeakerNames;
@@ -44,7 +45,15 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
     at_secs    REAL NOT NULL,
     label      TEXT NOT NULL
-);";
+);
+CREATE TABLE IF NOT EXISTS chunks (
+    meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    start_secs REAL NOT NULL,
+    text       TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    vector     BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chunks_by_meeting ON chunks(meeting_id);";
 
 /// Columns added after the first release, for databases created before them.
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[("meetings", "template", "TEXT NOT NULL DEFAULT 'general'")];
@@ -227,6 +236,52 @@ impl Store {
         Ok(found.into_iter().map(|(_, hit)| hit).collect())
     }
 
+    /// Meetings with a transcript that have no embedded passages from `model` yet.
+    pub fn meetings_to_index(&self, model: &str) -> Result<Vec<i64>, StoreError> {
+        let mut select = self.0.prepare(
+            "SELECT id FROM meetings m
+             WHERE EXISTS (SELECT 1 FROM segments WHERE meeting_id = m.id)
+               AND NOT EXISTS (SELECT 1 FROM chunks WHERE meeting_id = m.id AND model = ?1)
+             ORDER BY started_at DESC",
+        )?;
+        let ids = select.query_map([model], |row| row.get(0))?.collect::<Result<_, _>>()?;
+        Ok(ids)
+    }
+
+    /// Replaces the embedded passages of the meeting.
+    pub fn replace_chunks(&mut self, meeting_id: i64, model: &str, chunks: &[(f64, String, Vec<f32>)]) -> Result<(), StoreError> {
+        let transaction = self.0.transaction()?;
+        transaction.execute("DELETE FROM chunks WHERE meeting_id = ?1", [meeting_id])?;
+        {
+            let mut insert = transaction
+                .prepare("INSERT INTO chunks (meeting_id, start_secs, text, model, vector) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+            for (start_secs, text, vector) in chunks {
+                insert.execute(params![meeting_id, start_secs, text, model, to_bytes(vector)])?;
+            }
+        }
+        Ok(transaction.commit()?)
+    }
+
+    /// The passages of all meetings closest in meaning to `query`, best first. Only
+    /// passages embedded by `model` count, and only those scoring at least `min_score`.
+    pub fn nearest_chunks(&self, model: &str, query: &[f32], min_score: f32, limit: usize) -> Result<Vec<ChunkHit>, StoreError> {
+        let mut select = self.0.prepare(
+            "SELECT m.id, m.title, m.started_at, m.duration_secs, c.start_secs, c.text, c.vector
+             FROM chunks c JOIN meetings m ON m.id = c.meeting_id WHERE c.model = ?1",
+        )?;
+        let mut found: Vec<ChunkHit> = Vec::new();
+        let mut rows = select.query([model])?;
+        while let Some(row) = rows.next()? {
+            let score = cosine(query, &from_bytes(&row.get::<_, Vec<u8>>(6)?));
+            if score >= min_score {
+                found.push(ChunkHit { meeting: summary_from_row(row)?, start_secs: row.get(4)?, text: row.get(5)?, score });
+            }
+        }
+        found.sort_by(|a, b| b.score.total_cmp(&a.score));
+        found.truncate(limit);
+        Ok(found)
+    }
+
     pub fn load(&self, meeting_id: i64) -> Result<Option<(MeetingSummary, NotesSnapshot)>, StoreError> {
         let meeting = self
             .0
@@ -278,6 +333,15 @@ impl Store {
 
         Ok(Some((summary, NotesSnapshot { segments, mom, user_notes, names, chat, template, bookmarks })))
     }
+}
+
+/// A passage of a transcript found by meaning, with the meeting it is from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkHit {
+    pub meeting: MeetingSummary,
+    pub start_secs: f64,
+    pub text: String,
+    pub score: f32,
 }
 
 /// One transcript segment found by `Store::find_segments`, with the meeting it is from.

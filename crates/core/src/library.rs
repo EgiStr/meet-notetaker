@@ -4,7 +4,7 @@
 
 use crate::export::format_date;
 use crate::llm::Prompt;
-use crate::store::{Hit, MeetingSummary, Store, StoreError};
+use crate::store::{ChunkHit, Hit, MeetingSummary, Store, StoreError};
 
 /// How many meetings contribute their minutes, how long each may be, and how
 /// many transcript lines are quoted.
@@ -46,15 +46,17 @@ pub struct Question {
 }
 
 /// Gathers what the LLM needs to answer `question`. `None` while no meeting has
-/// minutes or matching transcript. `utc_offset_secs` is the local time zone, for the dates.
-pub fn prepare(store: &Store, question: &str, utc_offset_secs: i64) -> Result<Option<Question>, StoreError> {
+/// minutes or matching transcript. `semantic` are passages found by meaning, which
+/// come before the lines found by words. `utc_offset_secs` is the local time zone, for the dates.
+pub fn prepare(store: &Store, question: &str, utc_offset_secs: i64, semantic: &[ChunkHit]) -> Result<Option<Question>, StoreError> {
     let hits = store.find_segments(&search_terms(question), MAX_QUOTES)?;
     let recent = store.recent_moms(RECENT_LOOKBACK)?;
 
     // Minutes of the meetings that matched first, then of the latest ones.
+    let matched = semantic.iter().map(|chunk| chunk.meeting.id).chain(hits.iter().map(|hit| hit.meeting.id));
     let mut chosen: Vec<&(MeetingSummary, String)> = Vec::new();
-    for hit in &hits {
-        if let Some(found) = recent.iter().find(|(meeting, _)| meeting.id == hit.meeting.id) {
+    for meeting_id in matched {
+        if let Some(found) = recent.iter().find(|(meeting, _)| meeting.id == meeting_id) {
             if !chosen.iter().any(|(meeting, _)| meeting.id == found.0.id) {
                 chosen.push(found);
             }
@@ -66,7 +68,7 @@ pub fn prepare(store: &Store, question: &str, utc_offset_secs: i64) -> Result<Op
         }
     }
     chosen.truncate(MAX_MEETINGS);
-    if chosen.is_empty() && hits.is_empty() {
+    if chosen.is_empty() && hits.is_empty() && semantic.is_empty() {
         return Ok(None);
     }
 
@@ -75,20 +77,22 @@ pub fn prepare(store: &Store, question: &str, utc_offset_secs: i64) -> Result<Op
         .map(|(meeting, mom)| format!("### {} ({})\n{}", meeting.title, format_date(meeting.started_at, utc_offset_secs), truncated(mom)))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let quotes: String = hits
+    let quote = |meeting: &MeetingSummary, start_secs: f64, speaker: &str, text: &str| {
+        let whole = start_secs.max(0.0) as u64;
+        format!(
+            "[{} · {} · {:02}:{:02}] {}{}",
+            meeting.title,
+            format_date(meeting.started_at, utc_offset_secs),
+            whole / 60,
+            whole % 60,
+            speaker,
+            text
+        )
+    };
+    let quotes: String = semantic
         .iter()
-        .map(|hit| {
-            let whole = hit.segment.start_secs.max(0.0) as u64;
-            format!(
-                "[{} · {} · {:02}:{:02}] {}: {}",
-                hit.meeting.title,
-                format_date(hit.meeting.started_at, utc_offset_secs),
-                whole / 60,
-                whole % 60,
-                hit.speaker,
-                hit.segment.text
-            )
-        })
+        .map(|chunk| quote(&chunk.meeting, chunk.start_secs, "", &chunk.text))
+        .chain(hits.iter().map(|hit| quote(&hit.meeting, hit.segment.start_secs, &format!("{}: ", hit.speaker), &hit.segment.text)))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -98,19 +102,15 @@ pub fn prepare(store: &Store, question: &str, utc_offset_secs: i64) -> Result<Op
         or_none(&quotes),
         question.trim()
     );
-    Ok(Some(Question { prompt: Prompt { system: SYSTEM.into(), user }, sources: sources(&hits) }))
+    Ok(Some(Question { prompt: Prompt { system: SYSTEM.into(), user }, sources: sources(semantic, &hits) }))
 }
 
 /// The distinct meetings of the hits, in the order of the best hit of each.
-fn sources(hits: &[Hit]) -> Vec<Source> {
+fn sources(semantic: &[ChunkHit], hits: &[Hit]) -> Vec<Source> {
     let mut sources: Vec<Source> = Vec::new();
-    for hit in hits {
-        if sources.len() < MAX_SOURCES && !sources.iter().any(|source| source.meeting_id == hit.meeting.id) {
-            sources.push(Source {
-                meeting_id: hit.meeting.id,
-                title: hit.meeting.title.clone(),
-                started_at: hit.meeting.started_at,
-            });
+    for meeting in semantic.iter().map(|chunk| &chunk.meeting).chain(hits.iter().map(|hit| &hit.meeting)) {
+        if sources.len() < MAX_SOURCES && !sources.iter().any(|source| source.meeting_id == meeting.id) {
+            sources.push(Source { meeting_id: meeting.id, title: meeting.title.clone(), started_at: meeting.started_at });
         }
     }
     sources
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn nothing_saved_means_nothing_to_ask() {
-        assert!(prepare(&store(), "apa keputusan anggaran?", 0).unwrap().is_none());
+        assert!(prepare(&store(), "apa keputusan anggaran?", 0, &[]).unwrap().is_none());
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
         let budget = saved(&mut store, "Rapat anggaran", 1_709_249_400, "## Ringkasan\n- Anggaran", "Anggaran disetujui Jumat.");
         saved(&mut store, "Mingguan", 1_709_000_000, "## Ringkasan\n- Status", "Semua lancar.");
 
-        let question = prepare(&store, "Kapan anggaran disetujui?", 0).unwrap().unwrap();
+        let question = prepare(&store, "Kapan anggaran disetujui?", 0, &[]).unwrap().unwrap();
         assert!(question.prompt.user.contains("[Rapat anggaran · 2024-02-29 23:30 · 01:01] Pembicara 1: Anggaran disetujui Jumat."));
         assert!(question.prompt.user.contains("### Mingguan"), "minutes of other meetings give context too");
         assert!(question.prompt.user.ends_with("Pertanyaan: Kapan anggaran disetujui?"));
@@ -205,9 +205,24 @@ mod tests {
     fn a_question_without_matches_still_gets_the_latest_minutes() {
         let mut store = store();
         saved(&mut store, "Mingguan", 1, "## Ringkasan\n- Status", "Semua lancar.");
-        let question = prepare(&store, "Apa action item terakhir?", 0).unwrap().unwrap();
+        let question = prepare(&store, "Apa action item terakhir?", 0, &[]).unwrap().unwrap();
         assert!(question.prompt.user.contains("- Status"));
         assert!(question.sources.is_empty());
+    }
+
+    #[test]
+    fn passages_found_by_meaning_come_first_even_when_no_word_matches() {
+        let mut store = store();
+        let costs = saved(&mut store, "Rapat dana", 1_709_249_400, "## Ringkasan
+- Dana", "Server makin mahal.");
+        let meeting = MeetingSummary { id: costs, title: "Rapat dana".into(), started_at: 1_709_249_400, duration_secs: 0.0 };
+        let passage = ChunkHit { meeting, start_secs: 5.0, text: "Biaya server naik tiga puluh persen.".into(), score: 0.8 };
+
+        let question = prepare(&store, "Mengapa pengeluaran membengkak?", 0, &[passage]).unwrap().unwrap();
+
+        assert!(question.prompt.user.contains("[Rapat dana · 2024-02-29 23:30 · 00:05] Biaya server naik tiga puluh persen."));
+        assert_eq!(question.sources.len(), 1);
+        assert_eq!(question.sources[0].meeting_id, costs);
     }
 
     #[test]
