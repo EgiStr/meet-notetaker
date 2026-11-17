@@ -45,3 +45,21 @@ export function useAutostart() {
     change: (next: boolean) => invoke<boolean>("set_autostart", { enabled: next }).then(setEnabled),
   };
 }
+
+/** Called with the name of an online meeting (Google Meet, Zoom, Teams) that has just opened. */
+export function useMeetingDetected(onDetected: (name: string) => void) {
+  const latest = useRef(onDetected);
+  latest.current = onDetected;
+  useEffect(() => {
+    const stop = listen<string>("meeting-detected", ({ payload }) => latest.current(payload));
+    return () => void stop.then((unlisten) => unlisten());
+  }, []);
+}
+
+/** A desktop notification, shown only when the user is not looking at this window. */
+export function notifyAway(title: string, body: string) {
+  if (document.hasFocus()) return;
+  invoke("notify", { title, body }).catch(() => {
+    // A missed notification is not worth an error.
+  });
+}

@@ -11,6 +11,9 @@ use crate::prompts::{self, MomTemplate};
 use crate::speakers::{assign_speakers, replace_label, SpeakerNames, SpeakerTurn};
 use crate::transcript::{Source, TranscriptSegment};
 
+/// Less speech than this is not enough to name a meeting after.
+const MIN_TITLE_SPEECH_CHARS: usize = 120;
+
 pub struct MeetingNotes {
     llm: Arc<dyn LlmClient>,
     state: Mutex<State>,
@@ -265,7 +268,9 @@ impl MeetingNotes {
     pub fn suggest_title(&self) -> Result<Option<String>, LlmError> {
         let prompt = {
             let state = self.state();
-            if state.mom.trim().is_empty() {
+            // A few spoken words give minutes with nothing in them, and then a title about that.
+            let spoken: usize = state.segments.iter().map(|segment| segment.text.chars().count()).sum();
+            if state.mom.trim().is_empty() || spoken < MIN_TITLE_SPEECH_CHARS {
                 return Ok(None);
             }
             prompts::title(&state.mom)
@@ -394,6 +399,14 @@ impl LiveBrief {
 mod tests {
     use super::*;
     use crate::llm::Prompt;
+
+    #[test]
+    fn a_meeting_with_almost_no_speech_is_not_given_a_title() {
+        let notes = MeetingNotes::new(Arc::new(FakeLlm::default()));
+        notes.add_segment(TranscriptSegment { source: Source::System, start_secs: 0.0, end_secs: 1.0, text: "halo".into(), speaker: None });
+        notes.update_mom().unwrap();
+        assert_eq!(notes.suggest_title().unwrap(), None);
+    }
 
     #[test]
     fn replacing_one_stream_keeps_the_other() {

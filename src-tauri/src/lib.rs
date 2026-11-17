@@ -26,6 +26,7 @@ use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod models;
+mod desktop;
 mod tray;
 
 const SESSION_EVENT: &str = "session-event";
@@ -851,6 +852,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![tray::MINIMIZED_ARG])))
+        .plugin(tauri_plugin_notification::init())
+        .plugin(desktop::hotkey_plugin())
         .manage(Meeting::default())
         // Closing the window hides it; the app keeps running in the tray until it is quit from there.
         .on_window_event(|window, event| {
@@ -865,6 +868,7 @@ pub fn run() {
             app.manage(Db(Mutex::new(Store::open(&data_dir.join("meetings.db"))?)));
             index_in_background(app.handle());
             tray::setup(app)?;
+            desktop::setup(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -879,6 +883,7 @@ pub fn run() {
             tray::quit_app,
             tray::get_autostart,
             tray::set_autostart,
+            desktop::notify,
             edit_segment,
             get_glossary,
             set_glossary,

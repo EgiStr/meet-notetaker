@@ -7,7 +7,7 @@ import { MomPanel } from "./MomPanel";
 import { ModelPicker, Models } from "./Models";
 import { mentions, parseNames } from "./mentions";
 import { useModels } from "./providers";
-import { quitApp, useAutostart, useTray } from "./tray";
+import { notifyAway, quitApp, useAutostart, useMeetingDetected, useTray } from "./tray";
 import {
   TEMPLATES,
   catchUp,
@@ -125,6 +125,13 @@ export function App() {
     },
   });
 
+  /** An online meeting that opened while nothing is being recorded. */
+  const [detected, setDetected] = useState<string | null>(null);
+  useMeetingDetected(setDetected);
+  useEffect(() => {
+    if (status !== "idle") setDetected(null);
+  }, [status]);
+
   useEffect(() => {
     if (opened) {
       setTitle(opened.title);
@@ -161,6 +168,7 @@ export function App() {
     if (said) {
       setMention(said);
       beep();
+      notifyAway("Nama Anda disebut", `${formatClock(said.start_secs)}: ${said.text}`);
     }
   }, [segments]);
 
@@ -347,6 +355,10 @@ export function App() {
             <MenuItem onClick={() => void draftEmail()} disabled={status !== "idle" || !hasMeeting || email === "loading"}>
               Tulis email tindak lanjut
             </MenuItem>
+            <p className="px-2 py-1.5 text-xs text-zinc-500">
+              Pintasan global: <kbd className="rounded border border-zinc-300 bg-zinc-50 px-1">Ctrl+Alt+R</kbd> mulai atau
+              berhenti merekam dari aplikasi mana pun.
+            </p>
             {autostart.enabled !== null && (
               <>
                 <hr className="my-1 border-zinc-200" />
@@ -363,6 +375,26 @@ export function App() {
           </Menu>
         </div>
       </header>
+
+      {detected && status === "idle" && (
+        <section className="flex items-center gap-3 border-b border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm text-indigo-950">
+          <p className="min-w-0 flex-1">
+            <strong>{detected}</strong> terdeteksi. Rekam rapat ini?
+          </p>
+          <button
+            onClick={() => {
+              setDetected(null);
+              void start(title, template);
+            }}
+            className="rounded-md bg-red-600 px-3 py-1 font-medium text-white hover:bg-red-700"
+          >
+            Rekam
+          </button>
+          <button onClick={() => setDetected(null)} className="text-indigo-700 hover:text-indigo-950">
+            Nanti
+          </button>
+        </section>
+      )}
 
       {mention && (
         <section role="alert" className="flex items-start gap-3 border-b border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-950">

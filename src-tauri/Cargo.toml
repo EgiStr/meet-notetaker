@@ -24,3 +24,6 @@ serde = { version = "1", features = ["derive"] }
 # API keys go to the Windows Credential Manager, never into a file.
 keyring = { version = "3", features = ["windows-native"] }
 tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
