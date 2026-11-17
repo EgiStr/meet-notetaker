@@ -713,8 +713,30 @@ fn open_meeting(id: i64, app: AppHandle, meeting: State<Meeting>, db: State<Db>)
         .ok_or_else(|| "Rapat tidak ditemukan.".to_string())?;
     state.notes = Some(Arc::new(MeetingNotes::restore(models::llm(&app), notes.clone())));
     state.meeting_id = Some(id);
-    state.audio_dir = None;
+    // Only read from here (to play back); a new recording sets its own folder.
+    state.audio_dir = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("recordings").join(summary.started_at.to_string()))
+        .filter(|dir| dir.is_dir());
     Ok(MeetingView { summary, notes })
+}
+
+/// The saved audio of the current meeting, as paths the window can play: "microphone" and "system".
+#[tauri::command]
+fn recording_files(meeting: State<Meeting>) -> std::collections::HashMap<String, String> {
+    let mut files = std::collections::HashMap::new();
+    let Some(dir) = meeting.state().audio_dir.clone() else { return files };
+    for (name, source) in [("microphone", Source::Microphone), ("system", Source::System)] {
+        let wav = recording_path(&dir, source);
+        // Finished recordings are FLAC; one still being written or not yet compressed is WAV.
+        let flac = wav.with_extension("flac");
+        if let Some(path) = [flac, wav].into_iter().find(|path| path.exists()) {
+            files.insert(name.to_owned(), path.to_string_lossy().into_owned());
+        }
+    }
+    files
 }
 
 /// Chooses the transcription provider from STT_PROVIDER: "openai" (default,
@@ -865,6 +887,7 @@ pub fn run() {
             search_history,
             import_recording,
             open_meeting,
+            recording_files,
             set_template,
             add_bookmark,
             remove_bookmark,

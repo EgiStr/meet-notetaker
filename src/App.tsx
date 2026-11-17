@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { AskPanel, NotesPanel } from "./AskPanel";
@@ -92,6 +92,12 @@ export function App() {
   const autostart = useAutostart();
   const [language, setLanguage] = useState("id");
   const [glossary, setGlossary] = useState("");
+  /** The saved audio of this meeting, by stream, so a transcript line can be played. */
+  const [audioFiles, setAudioFiles] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (status === "recording" || status === "stopping" || status === "importing") return;
+    invoke<Record<string, string>>("recording_files").then(setAudioFiles, () => setAudioFiles({}));
+  }, [meetingId, status]);
   useEffect(() => {
     invoke<string>("get_language").then(setLanguage, () => {});
     invoke<string>("get_glossary").then(setGlossary, () => {});
@@ -451,6 +457,7 @@ export function App() {
             highlight={myNames}
             onRename={rename}
             onEdit={edit}
+            audioFiles={audioFiles}
             onBookmark={(segment) => report(addBookmark(segment.text.slice(0, 80), segment.start_secs))}
             onStart={() => void start(title, template)}
             onImport={() => void importRecording()}
@@ -601,6 +608,7 @@ interface TranscriptProps {
   onRename: (speaker: number, name: string) => void;
   onBookmark: (segment: Segment) => void;
   onEdit: (segment: Segment, text: string) => void;
+  audioFiles: Record<string, string>;
   onStart: () => void;
   onImport: () => void;
 }
@@ -655,7 +663,7 @@ function plainTranscript(turns: Turn[]): string {
     .join("\n\n");
 }
 
-function Transcript({ segments, status, names, highlight, onRename, onBookmark, onEdit, onStart, onImport }: TranscriptProps) {
+function Transcript({ segments, status, names, highlight, onRename, onBookmark, onEdit, audioFiles, onStart, onImport }: TranscriptProps) {
   const scroller = useRef<HTMLElement>(null);
   const nearBottom = useRef(true);
   useEffect(() => {
@@ -668,6 +676,32 @@ function Transcript({ segments, status, names, highlight, onRename, onBookmark, 
   const [current, setCurrent] = useState(0);
   const [editing, setEditing] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const player = useRef<HTMLAudioElement>(null);
+  /** The line being played, so its button can stop it. */
+  const [playing, setPlaying] = useState<string | null>(null);
+
+  /** Plays the recording of one line, from a moment before it starts until it ends. */
+  function play(segment: Segment, id: string) {
+    const audio = player.current;
+    const file = audioFiles[segment.source];
+    if (!audio || !file) return;
+    if (playing === id) {
+      audio.pause();
+      setPlaying(null);
+      return;
+    }
+    const src = convertFileSrc(file);
+    if (audio.getAttribute("src") !== src) audio.src = src;
+    audio.currentTime = Math.max(0, segment.start_secs - 0.3);
+    audio.ontimeupdate = () => {
+      if (audio.currentTime >= segment.end_secs) {
+        audio.pause();
+        setPlaying(null);
+      }
+    };
+    audio.onpause = () => setPlaying((now) => (now === id ? null : now));
+    void audio.play().then(() => setPlaying(id), () => setPlaying(null));
+  }
   const needle = query.trim();
   const matches = needle ? segments.filter((s) => s.text.toLowerCase().includes(needle.toLowerCase())).length : 0;
 
@@ -758,6 +792,7 @@ function Transcript({ segments, status, names, highlight, onRename, onBookmark, 
           {copied ? "Tersalin" : "Salin"}
         </button>
       </div>
+      <audio ref={player} preload="none" />
       <div className="px-5 py-4">
         {status === "idle" && <SpeakerNamesForm segments={segments} names={names} onRename={onRename} />}
         <ol className="mx-auto flex max-w-3xl flex-col gap-5">
@@ -814,7 +849,21 @@ function Transcript({ segments, status, names, highlight, onRename, onBookmark, 
                         </p>
                       )}
                     </div>
-                    <span className="flex items-start gap-2 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+                    <span
+                      className={`flex items-start gap-2 focus-within:opacity-100 group-hover:opacity-100 ${
+                        playing === key(segment) ? "" : "opacity-0"
+                      }`}
+                    >
+                      {status === "idle" && audioFiles[segment.source] && (
+                        <button
+                          onClick={() => play(segment, key(segment))}
+                          aria-label={`${playing === key(segment) ? "Hentikan" : "Putar"} ${formatClock(segment.start_secs)}`}
+                          title="Dengarkan bagian ini"
+                          className="text-zinc-400 hover:text-zinc-900"
+                        >
+                          {playing === key(segment) ? "■" : "▶"}
+                        </button>
+                      )}
                       {status === "idle" && (
                         <button
                           onClick={() => setEditing(key(segment))}
@@ -858,7 +907,7 @@ function SpeakerNamesForm({
   segments,
   names,
   onRename,
-}: Omit<TranscriptProps, "status" | "highlight" | "onBookmark" | "onEdit" | "onStart" | "onImport">) {
+}: Omit<TranscriptProps, "status" | "highlight" | "onBookmark" | "onEdit" | "audioFiles" | "onStart" | "onImport">) {
   const speakers = [...new Set(segments.flatMap((segment) => segment.speaker ?? []))].sort((a, b) => a - b);
   if (speakers.length === 0) return null;
 

@@ -19,7 +19,7 @@ local-whisper = ["notetaker-core/local-whisper"]
 [dependencies]
 tauri-plugin-dialog = "2"
 notetaker-core = { path = "../crates/core" }
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 # API keys go to the Windows Credential Manager, never into a file.
 keyring = { version = "3", features = ["windows-native"] }
