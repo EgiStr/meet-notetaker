@@ -77,7 +77,7 @@ const LANGUAGES: [string, string][] = [
 const BUTTON = "rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50";
 
 export function App() {
-  const { status, segments, error, meetingId, names, opened, start, stop, open, rename, importFile, clear } =
+  const { status, segments, error, meetingId, names, opened, start, stop, open, rename, edit, importFile, clear } =
     useRecording();
   const { mom, pending } = useMom(meetingId, opened?.mom ?? "");
   const { questions, setQuestions } = useQuestions(meetingId);
@@ -437,6 +437,7 @@ export function App() {
             names={names}
             highlight={myNames}
             onRename={rename}
+            onEdit={edit}
             onBookmark={(segment) => report(addBookmark(segment.text.slice(0, 80), segment.start_secs))}
             onStart={() => void start(title, template)}
             onImport={() => void importRecording()}
@@ -586,27 +587,95 @@ interface TranscriptProps {
   highlight: string[];
   onRename: (speaker: number, name: string) => void;
   onBookmark: (segment: Segment) => void;
+  onEdit: (segment: Segment, text: string) => void;
   onStart: () => void;
   onImport: () => void;
 }
 
-function Transcript({ segments, status, names, highlight, onRename, onBookmark, onStart, onImport }: TranscriptProps) {
-  const end = useRef<HTMLDivElement>(null);
+/** Consecutive lines by the same speaker, close in time, read as one paragraph block. */
+interface Turn {
+  label: string;
+  source: Source;
+  start: number;
+  lines: Segment[];
+}
+
+const TURN_GAP_SECS = 30;
+
+function groupTurns(segments: Segment[], names: SpeakerNames): Turn[] {
+  const turns: Turn[] = [];
+  for (const segment of segments) {
+    const label = speakerLabel(segment, names);
+    const last = turns.at(-1);
+    if (last && last.label === label && segment.start_secs - last.lines[last.lines.length - 1].end_secs < TURN_GAP_SECS) {
+      last.lines.push(segment);
+    } else {
+      turns.push({ label, source: segment.source, start: segment.start_secs, lines: [segment] });
+    }
+  }
+  return turns;
+}
+
+/** The text with every match of `query` marked. */
+function Marked({ text, query }: { text: string; query: string }) {
+  if (!query) return <>{text}</>;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = text.split(new RegExp(`(${escaped})`, "i"));
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.toLowerCase() === query.toLowerCase() ? (
+          <mark key={index} data-match className="rounded bg-yellow-200 px-0.5">
+            {part}
+          </mark>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  );
+}
+
+function plainTranscript(turns: Turn[]): string {
+  return turns
+    .map((turn) => `[${formatClock(turn.start)}] ${turn.label}: ${turn.lines.map((line) => line.text).join(" ")}`)
+    .join("\n\n");
+}
+
+function Transcript({ segments, status, names, highlight, onRename, onBookmark, onEdit, onStart, onImport }: TranscriptProps) {
+  const scroller = useRef<HTMLElement>(null);
+  const nearBottom = useRef(true);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: "end" });
+    // Follow the live transcript, but never pull the reader away from what they scrolled back to.
+    const box = scroller.current;
+    if (box && nearBottom.current) box.scrollTop = box.scrollHeight;
   }, [segments.length]);
+
+  const [query, setQuery] = useState("");
+  const [current, setCurrent] = useState(0);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const needle = query.trim();
+  const matches = needle ? segments.filter((s) => s.text.toLowerCase().includes(needle.toLowerCase())).length : 0;
+
+  useEffect(() => setCurrent(0), [needle]);
+  useEffect(() => {
+    if (!needle) return;
+    const marks = scroller.current?.querySelectorAll("[data-match]");
+    marks?.[current % Math.max(marks.length, 1)]?.scrollIntoView({ block: "center" });
+  }, [needle, current]);
 
   /** What the assistant said about a line, by the line's start time. */
   const [explanations, setExplanations] = useState<Record<number, { text: string; ok: boolean }>>({});
 
   async function explain(segment: Segment) {
     const at = segment.start_secs;
-    setExplanations((current) => ({ ...current, [at]: { text: "Menjelaskan…", ok: true } }));
+    setExplanations((state) => ({ ...state, [at]: { text: "Menjelaskan…", ok: true } }));
     try {
       const text = await explainLine(segment.text, at);
-      setExplanations((current) => ({ ...current, [at]: { text, ok: true } }));
+      setExplanations((state) => ({ ...state, [at]: { text, ok: true } }));
     } catch (reason) {
-      setExplanations((current) => ({ ...current, [at]: { text: String(reason), ok: false } }));
+      setExplanations((state) => ({ ...state, [at]: { text: String(reason), ok: false } }));
     }
   }
 
@@ -635,61 +704,138 @@ function Transcript({ segments, status, names, highlight, onRename, onBookmark, 
     );
   }
 
+  const turns = groupTurns(segments, names);
+  const key = (segment: Segment) => `${segment.source}-${segment.start_secs}`;
+
   return (
-    <main className="min-h-0 overflow-y-auto px-5 py-4">
-      {status === "idle" && <SpeakerNamesForm segments={segments} names={names} onRename={onRename} />}
-      <ol className="mx-auto flex max-w-3xl flex-col gap-3">
-        {segments.map((segment) => (
-          <li
-            key={`${segment.source}-${segment.start_secs}`}
-            className="group grid grid-cols-[3rem_5.5rem_1fr_3.5rem] gap-3 text-sm"
-          >
-            <time className="font-mono tabular-nums text-zinc-500">{formatClock(segment.start_secs)}</time>
-            <span className={`break-words font-medium ${SPEAKER_COLOR[segment.source]}`}>
-              {speakerLabel(segment, names)}
-            </span>
-            <div>
-              <p
-                className={`leading-relaxed ${
-                  segment.source === "system" && mentions(segment.text, highlight) ? "rounded bg-amber-100 px-1" : ""
-                }`}
-              >
-                {segment.text}
+    <main
+      ref={scroller}
+      onScroll={(event) => {
+        const box = event.currentTarget;
+        nearBottom.current = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+      }}
+      className="min-h-0 overflow-y-auto"
+    >
+      <div className="sticky top-0 z-[1] flex items-center gap-2 border-b border-zinc-200 bg-zinc-50/95 px-5 py-2 backdrop-blur">
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && matches > 0) setCurrent((value) => (value + (event.shiftKey ? matches - 1 : 1)) % matches);
+            if (event.key === "Escape") setQuery("");
+          }}
+          placeholder="Cari di transkrip"
+          aria-label="Cari di transkrip"
+          className="min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-zinc-500"
+        />
+        {needle && (
+          <span className="whitespace-nowrap text-xs text-zinc-500">
+            {matches === 0 ? "Tidak ada" : `${(current % matches) + 1} dari ${matches}`}
+          </span>
+        )}
+        <button
+          onClick={() =>
+            void navigator.clipboard.writeText(plainTranscript(turns)).then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            })
+          }
+          className="whitespace-nowrap rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm hover:bg-zinc-100"
+        >
+          {copied ? "Tersalin" : "Salin"}
+        </button>
+      </div>
+      <div className="px-5 py-4">
+        {status === "idle" && <SpeakerNamesForm segments={segments} names={names} onRename={onRename} />}
+        <ol className="mx-auto flex max-w-3xl flex-col gap-5">
+          {turns.map((turn) => (
+            <li key={`${turn.source}-${turn.start}`} className="text-sm">
+              <p className="mb-1 flex items-baseline gap-2">
+                <span className={`font-semibold ${SPEAKER_COLOR[turn.source]}`}>{turn.label}</span>
+                <time className="font-mono text-xs tabular-nums text-zinc-400">{formatClock(turn.start)}</time>
               </p>
-              {explanations[segment.start_secs] && (
-                <p
-                  className={`mt-1 whitespace-pre-wrap rounded-md border px-3 py-2 leading-relaxed ${
-                    explanations[segment.start_secs].ok
-                      ? "border-indigo-200 bg-indigo-50 text-indigo-950"
-                      : "border-red-200 bg-red-50 text-red-800"
-                  }`}
-                >
-                  {explanations[segment.start_secs].text}
-                </p>
-              )}
-            </div>
-            <span className="flex items-start gap-2 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
-              <button
-                onClick={() => void explain(segment)}
-                aria-label={`Jelaskan ${formatClock(segment.start_secs)}`}
-                title="Jelaskan ucapan ini"
-                className="font-medium text-indigo-600 hover:text-indigo-900"
-              >
-                ?
-              </button>
-              <button
-                onClick={() => onBookmark(segment)}
-                aria-label={`Tandai ${formatClock(segment.start_secs)}`}
-                title="Tandai bagian ini"
-                className="text-zinc-400 hover:text-amber-600"
-              >
-                ☆
-              </button>
-            </span>
-          </li>
-        ))}
-      </ol>
-      <div ref={end} />
+              <div className="flex flex-col gap-1">
+                {turn.lines.map((segment) => (
+                  <div key={key(segment)} className="group flex items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      {editing === key(segment) ? (
+                        <textarea
+                          autoFocus
+                          defaultValue={segment.text}
+                          rows={Math.max(2, Math.ceil(segment.text.length / 70))}
+                          aria-label="Perbaiki teks"
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") setEditing(null);
+                            if (event.key === "Enter" && !event.shiftKey) {
+                              event.preventDefault();
+                              onEdit(segment, event.currentTarget.value);
+                              setEditing(null);
+                            }
+                          }}
+                          onBlur={(event) => {
+                            onEdit(segment, event.currentTarget.value);
+                            setEditing(null);
+                          }}
+                          className="w-full rounded-md border border-indigo-400 bg-white px-2 py-1 leading-relaxed outline-none"
+                        />
+                      ) : (
+                        <p
+                          onDoubleClick={() => status === "idle" && setEditing(key(segment))}
+                          title={status === "idle" ? "Klik dua kali untuk memperbaiki" : undefined}
+                          className={`leading-relaxed ${
+                            segment.source === "system" && mentions(segment.text, highlight) ? "rounded bg-amber-100 px-1" : ""
+                          }`}
+                        >
+                          <Marked text={segment.text} query={needle} />
+                        </p>
+                      )}
+                      {explanations[segment.start_secs] && (
+                        <p
+                          className={`mt-1 whitespace-pre-wrap rounded-md border px-3 py-2 leading-relaxed ${
+                            explanations[segment.start_secs].ok
+                              ? "border-indigo-200 bg-indigo-50 text-indigo-950"
+                              : "border-red-200 bg-red-50 text-red-800"
+                          }`}
+                        >
+                          {explanations[segment.start_secs].text}
+                        </p>
+                      )}
+                    </div>
+                    <span className="flex items-start gap-2 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+                      {status === "idle" && (
+                        <button
+                          onClick={() => setEditing(key(segment))}
+                          aria-label={`Perbaiki ${formatClock(segment.start_secs)}`}
+                          title="Perbaiki teks"
+                          className="text-zinc-400 hover:text-zinc-900"
+                        >
+                          ✎
+                        </button>
+                      )}
+                      <button
+                        onClick={() => void explain(segment)}
+                        aria-label={`Jelaskan ${formatClock(segment.start_secs)}`}
+                        title="Jelaskan ucapan ini"
+                        className="font-medium text-indigo-600 hover:text-indigo-900"
+                      >
+                        ?
+                      </button>
+                      <button
+                        onClick={() => onBookmark(segment)}
+                        aria-label={`Tandai ${formatClock(segment.start_secs)}`}
+                        title="Tandai bagian ini"
+                        className="text-zinc-400 hover:text-amber-600"
+                      >
+                        ☆
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </li>
+          ))}
+        </ol>
+      </div>
     </main>
   );
 }
@@ -699,7 +845,7 @@ function SpeakerNamesForm({
   segments,
   names,
   onRename,
-}: Omit<TranscriptProps, "status" | "highlight" | "onBookmark" | "onStart" | "onImport">) {
+}: Omit<TranscriptProps, "status" | "highlight" | "onBookmark" | "onEdit" | "onStart" | "onImport">) {
   const speakers = [...new Set(segments.flatMap((segment) => segment.speaker ?? []))].sort((a, b) => a - b);
   if (speakers.length === 0) return null;
 

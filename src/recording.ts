@@ -162,7 +162,23 @@ export function useRecording() {
     }
   }
 
-  return { status, segments, error, meetingId, names, opened, start, stop, open, rename, importFile, clear };
+  /** Corrects the words of one line. */
+  async function edit(segment: Segment, text: string) {
+    const fixed = text.trim();
+    if (!fixed || fixed === segment.text) return;
+    try {
+      await invoke("edit_segment", { source: segment.source, startSecs: segment.start_secs, text: fixed });
+      setSegments((current) =>
+        current.map((line) =>
+          line.source === segment.source && line.start_secs === segment.start_secs ? { ...line, text: fixed } : line,
+        ),
+      );
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  return { status, segments, error, meetingId, names, opened, start, stop, open, rename, edit, importFile, clear };
 }
 
 /** The two streams are transcribed independently, so segments can arrive out of order. */

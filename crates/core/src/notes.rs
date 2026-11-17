@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::llm::{LlmClient, LlmError};
 use crate::prompts::{self, MomTemplate};
 use crate::speakers::{assign_speakers, replace_label, SpeakerNames, SpeakerTurn};
-use crate::transcript::TranscriptSegment;
+use crate::transcript::{Source, TranscriptSegment};
 
 pub struct MeetingNotes {
     llm: Arc<dyn LlmClient>,
@@ -121,6 +121,23 @@ impl MeetingNotes {
 
     pub fn add_segment(&self, segment: TranscriptSegment) {
         self.state().segments.push(segment);
+    }
+
+    /// Replaces the words of one line, found by its stream and start time. An empty text
+    /// leaves the line as it was. Returns whether a line was changed.
+    pub fn edit_segment(&self, source: Source, start_secs: f64, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        let mut state = self.state();
+        match state.segments.iter_mut().find(|s| s.source == source && s.start_secs == start_secs) {
+            Some(segment) if segment.text != text => {
+                segment.text = text.to_owned();
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn set_user_notes(&self, notes: String) {
@@ -367,7 +384,19 @@ impl LiveBrief {
 mod tests {
     use super::*;
     use crate::llm::Prompt;
-    use crate::transcript::Source;
+
+    #[test]
+    fn editing_a_line_changes_only_that_line() {
+        let notes = MeetingNotes::new(Arc::new(FakeLlm::default()));
+        let line = |source, start: f64, text: &str| TranscriptSegment { source, start_secs: start, end_secs: start + 1.0, text: text.into(), speaker: None };
+        notes.add_segment(line(Source::System, 1.0, "halo"));
+        notes.add_segment(line(Source::Microphone, 1.0, "hai"));
+        assert!(notes.edit_segment(Source::System, 1.0, "  Halo semua  "));
+        assert!(!notes.edit_segment(Source::System, 1.0, "   "));
+        assert!(!notes.edit_segment(Source::System, 9.0, "x"));
+        let texts: Vec<String> = notes.transcript().into_iter().map(|s| s.text).collect();
+        assert!(texts.contains(&"Halo semua".to_string()) && texts.contains(&"hai".to_string()));
+    }
 
     /// Records every prompt and replies with canned results, then with "mom N".
     #[derive(Default)]

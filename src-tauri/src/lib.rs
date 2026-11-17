@@ -348,6 +348,20 @@ fn rename_speaker(speaker: u32, name: String, app: AppHandle, meeting: State<Mee
     Ok(())
 }
 
+/// Corrects the words of a transcript line; `source` is "microphone" or "system".
+#[tauri::command]
+fn edit_segment(source: String, start_secs: f64, text: String, app: AppHandle, meeting: State<Meeting>) -> Result<(), String> {
+    let source = match source.as_str() {
+        "microphone" => Source::Microphone,
+        "system" => Source::System,
+        other => return Err(format!("Sumber \"{other}\" tidak dikenal.")),
+    };
+    if meeting.notes()?.edit_segment(source, start_secs, &text) {
+        save_meeting(&app);
+    }
+    Ok(())
+}
+
 /// Retries the final minutes after a failure.
 #[tauri::command]
 async fn rebuild_mom(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
@@ -771,6 +785,7 @@ pub fn run() {
             tray::quit_app,
             tray::get_autostart,
             tray::set_autostart,
+            edit_segment,
             get_language,
             set_language,
             search_history,

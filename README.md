@@ -8,7 +8,7 @@ Dibangun dengan Rust (Tauri 2) dan React. Desain lengkap ada di [docs/PRD.md](do
 
 ## Fitur
 
-- Rekam mikrofon dan audio sistem, transkrip langsung.
+- Rekam mikrofon dan audio sistem, transkrip langsung. Transkrip dikelompokkan per pembicara, bisa dicari, disalin, dan diperbaiki per baris (klik dua kali).
 - Notulen berkala dan akhir, dengan template: umum, standup, one-on-one, penjualan, retro.
 - Catatan pribadi yang bisa diperluas AI, pertanyaan yang disarankan, tanya jawab saat rapat.
 - Label pembicara otomatis (diarization) dan nama pembicara yang bisa diubah.
