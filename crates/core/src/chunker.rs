@@ -56,7 +56,16 @@ pub struct Chunker {
     current: Vec<f32>,
     current_start: u64,
     trailing_silence: usize,
+    /// The quietest level this stream keeps returning to: its background noise.
+    noise_floor: Option<f32>,
 }
+
+/// Speech must be this many times louder than the noise floor, but never needs to exceed this.
+const SPEECH_OVER_NOISE: f32 = 2.5;
+const MAX_NOISE_THRESHOLD: f32 = 0.08;
+/// The floor follows a quieter frame at once and rises towards a louder one over about two minutes,
+/// so a long stretch of speech does not become the new "noise".
+const FLOOR_RISE: f32 = 0.0003;
 
 impl Chunker {
     pub fn new(config: ChunkerConfig) -> Self {
@@ -71,7 +80,19 @@ impl Chunker {
             current: Vec::new(),
             current_start: 0,
             trailing_silence: 0,
+            noise_floor: None,
         }
+    }
+
+    /// A room that is never quiet (a microphone without headphones) must not count as speech
+    /// all the time; the transcriber would be handed noise, and invent words for it.
+    fn threshold(&mut self, level: f32) -> f32 {
+        let floor = match self.noise_floor {
+            Some(floor) if level >= floor => floor + (level - floor) * FLOOR_RISE,
+            _ => level,
+        };
+        self.noise_floor = Some(floor);
+        self.speech_rms.max((floor * SPEECH_OVER_NOISE).min(MAX_NOISE_THRESHOLD))
     }
 
     pub fn push(&mut self, samples: &[f32]) -> Vec<Chunk> {
@@ -100,7 +121,8 @@ impl Chunker {
     }
 
     fn accept_frame(&mut self, frame_start: u64, frame: &[f32]) -> Option<Chunk> {
-        let is_speech = rms(frame) >= self.speech_rms;
+        let level = rms(frame);
+        let is_speech = level >= self.threshold(level);
         if self.current.is_empty() {
             if !is_speech {
                 return None;
@@ -150,6 +172,16 @@ mod tests {
 
     fn seconds(chunk: &Chunk) -> f64 {
         chunk.samples.len() as f64 / 16_000.0
+    }
+
+    #[test]
+    fn steady_background_noise_is_not_speech_but_louder_speech_still_is() {
+        let mut chunker = chunker();
+        chunker.push(&vec![0.03; seconds_to_samples(10.0)]);
+        chunker.push(&speech(7.0));
+        let closed = chunker.push(&vec![0.03; seconds_to_samples(1.0)]);
+        assert_eq!(closed.len(), 1);
+        assert!((closed[0].start_sample as f64 / 16_000.0 - 10.0).abs() < 0.1);
     }
 
     #[test]
