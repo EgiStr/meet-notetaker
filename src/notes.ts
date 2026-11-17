@@ -8,6 +8,7 @@ type NotesEvent =
   | { kind: "pending"; data: string }
   | { kind: "questions"; data: string[] }
   | { kind: "brief"; data: string }
+  | { kind: "title"; data: string }
   | { kind: "transcript" };
 
 /** The minutes of the current meeting, and why an update is pending when one failed. */
@@ -36,6 +37,18 @@ export function useMom(meetingId: number, savedMom: string) {
   }, []);
 
   return { mom, pending };
+}
+
+/** Calls `onTitle` when the app gave a meeting that had none a title from its minutes. */
+export function useAutoTitle(onTitle: (title: string) => void) {
+  useEffect(() => {
+    const unlisten = listen<NotesEvent>("notes-event", ({ payload }) => {
+      if (payload.kind === "title") onTitle(payload.data);
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
 }
 
 /** The recap of what is being discussed, refreshed by the app while recording. */

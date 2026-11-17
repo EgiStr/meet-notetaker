@@ -31,6 +31,7 @@ const MOM_INTERVAL: Duration = Duration::from_secs(120);
 /// question suggestions this stays under the free Gemini limit of 5 requests a minute.
 const BRIEF_INTERVAL: Duration = Duration::from_secs(60);
 const BRIEF_WINDOW_SECS: f64 = 300.0;
+const DEFAULT_TITLE: &str = "Rapat tanpa judul";
 
 /// The meeting database. SQLite connections are used from one thread at a time.
 struct Db(Mutex<Store>);
@@ -49,6 +50,8 @@ struct MeetingState {
     session: Option<Session>,
     periodic_mom: Option<PeriodicMom>,
     live_brief: Option<LiveBrief>,
+    /// The running recording was started without a title and gets one when it ends.
+    untitled: bool,
     /// Kept after the recording stops so that questions can still be asked.
     notes: Option<Arc<MeetingNotes>>,
     /// The database row of the meeting that `notes` belongs to.
@@ -81,6 +84,8 @@ enum NotesEvent {
     Questions(Vec<String>),
     /// The latest recap of what is being discussed, refreshed while recording.
     Brief(String),
+    /// The title chosen for a meeting that was started without one.
+    Title(String),
 }
 
 fn emit_error(app: &AppHandle, error: impl std::fmt::Display) {
@@ -138,10 +143,8 @@ fn start_recording(
     notes.set_template(template);
     let started_at = unix_now()?;
     let audio_dir = new_audio_dir(&app, started_at)?;
-    let title = match title.trim() {
-        "" => "Rapat tanpa judul",
-        trimmed => trimmed,
-    };
+    let untitled = title.trim().is_empty();
+    let title = if untitled { DEFAULT_TITLE } else { title.trim() };
     let meeting_id = db.store().create_meeting(title, started_at).map_err(|error| error.to_string())?;
 
     let sink: EventSink = {
@@ -178,7 +181,18 @@ fn start_recording(
     }));
     state.notes = Some(notes);
     state.meeting_id = Some(meeting_id);
+    state.untitled = untitled;
     Ok(())
+}
+
+/// Gives a meeting that was started without a title one from its minutes. A failure keeps the placeholder.
+fn auto_title(app: &AppHandle, notes: &MeetingNotes, meeting_id: i64) {
+    let Ok(Some(title)) = notes.suggest_title() else {
+        return;
+    };
+    if matches!(app.state::<Db>().store().rename(meeting_id, &title), Ok(true)) {
+        let _ = app.emit(NOTES_EVENT, &NotesEvent::Title(title));
+    }
 }
 
 /// One folder per meeting under the app data folder.
@@ -202,15 +216,17 @@ fn unix_now() -> Result<i64, String> {
 /// and the final minutes were attempted.
 #[tauri::command]
 async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
-    let (session, periodic_mom, live_brief, notes, audio_dir) = {
+    let (session, periodic_mom, live_brief, notes, audio_dir, untitled_id) = {
         let mut state = meeting.state();
         state.started = None;
+        let untitled_id = if std::mem::take(&mut state.untitled) { state.meeting_id } else { None };
         (
             state.session.take(),
             state.periodic_mom.take(),
             state.live_brief.take(),
             state.notes.clone(),
             state.audio_dir.clone(),
+            untitled_id,
         )
     };
     spawn_blocking(move || {
@@ -229,6 +245,9 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
             }
             rebuild_and_emit(&app, &notes);
             save_meeting(&app);
+            if let Some(meeting_id) = untitled_id {
+                auto_title(&app, &notes, meeting_id);
+            }
         }
     })
     .await

@@ -14,6 +14,7 @@ import {
   followUpEmail,
   rebuildMom,
   setTemplate as applyTemplate,
+  useAutoTitle,
   useBookmarks,
   useBrief,
   useMom,
@@ -59,6 +60,7 @@ export function App() {
   const brief = useBrief(meetingId);
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(meetingId, opened?.bookmarks ?? []);
   const [title, setTitle] = useState("");
+  useAutoTitle(setTitle);
   const [template, setTemplate] = useState("general");
   const [showHistory, setShowHistory] = useState(false);
   const [showModels, setShowModels] = useState(false);

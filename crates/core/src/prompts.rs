@@ -197,6 +197,29 @@ rapat ini, dan arti istilah, singkatan, atau nama yang mungkin asing. Gunakan pe
 sebagai konteks dan katakan jika konteksnya belum cukup. Transkrip bisa salah dengar; jika sebuah kata \
 tampak keliru, sebutkan kemungkinan yang dimaksud. Teks biasa, tanpa format Markdown.";
 
+const TITLE_SYSTEM: &str = "\
+Beri judul singkat untuk rapat berdasarkan MoM-nya: paling banyak 6 kata, bahasa Indonesia, \
+menyebut topik utama, tanpa tanda kutip dan tanpa kata \"Rapat\" di awal. Keluarkan hanya judulnya.";
+
+const MAX_TITLE_CHARS: usize = 60;
+
+/// Asks for a short title for a meeting from its minutes.
+pub fn title(mom: &str) -> Prompt {
+    Prompt { system: TITLE_SYSTEM.into(), user: format!("MoM:\n{}\n\nJudul:", or_none(mom)) }
+}
+
+/// The title in an LLM reply: the first line without quotes, bullets or a "Judul:" label, cut short.
+pub fn parse_title(reply: &str) -> Option<String> {
+    let line = reply.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let line = line.trim_start_matches(|c: char| matches!(c, '-' | '*' | '#') || c.is_whitespace());
+    let line = line.strip_prefix("Judul:").unwrap_or(line);
+    let title = line.trim().trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '*')).trim();
+    if title.is_empty() {
+        return None;
+    }
+    Some(title.chars().take(MAX_TITLE_CHARS).collect::<String>().trim_end().to_owned())
+}
+
 const FOLLOW_UP_SYSTEM: &str = "\
 Anda menulis draf email tindak lanjut rapat atas nama pengguna (\"Saya\" di transkrip). Tulis dalam \
 bahasa Indonesia yang sopan dan ringkas, siap dikirim ke seluruh peserta: baris pertama \"Subjek: \
@@ -345,6 +368,17 @@ mod tests {
         assert!(prompt.user.contains("kalimat 20") && prompt.user.contains("kalimat 8") && prompt.user.contains("kalimat 32"));
         assert!(!prompt.user.contains("kalimat 7\n") && !prompt.user.contains("kalimat 33"));
         assert!(prompt.user.ends_with("Ucapan yang saya tidak paham: \"kalimat 20\""));
+    }
+
+    #[test]
+    fn a_title_is_the_first_clean_line_of_the_reply() {
+        assert_eq!(parse_title("\n  \"Anggaran dan Jadwal Rilis\"\nPenjelasan"), Some("Anggaran dan Jadwal Rilis".into()));
+        assert_eq!(parse_title("Judul: **Evaluasi Vendor**"), Some("Evaluasi Vendor".into()));
+        assert_eq!(parse_title("- Sprint retro"), Some("Sprint retro".into()));
+        assert_eq!(parse_title(&"a".repeat(100)).unwrap().chars().count(), 60);
+        assert_eq!(parse_title("  \n "), None);
+        assert_eq!(parse_title("\"\""), None);
+        assert!(title("").user.contains("(belum ada)"));
     }
 
     #[test]

@@ -234,6 +234,18 @@ impl MeetingNotes {
         Ok(Some(brief))
     }
 
+    /// A short title from the minutes; `None` while there are no minutes or the reply holds no title.
+    pub fn suggest_title(&self) -> Result<Option<String>, LlmError> {
+        let prompt = {
+            let state = self.state();
+            if state.mom.trim().is_empty() {
+                return Ok(None);
+            }
+            prompts::title(&state.mom)
+        };
+        Ok(prompts::parse_title(&self.llm.complete(&prompt)?))
+    }
+
     /// A follow-up email for the participants; `None` before anyone spoke.
     pub fn follow_up_email(&self) -> Result<Option<String>, LlmError> {
         let prompt = {

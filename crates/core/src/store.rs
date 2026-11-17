@@ -97,6 +97,11 @@ impl Store {
         Ok(self.0.last_insert_rowid())
     }
 
+    /// Changes the title of a meeting. Returns whether it existed.
+    pub fn rename(&self, meeting_id: i64, title: &str) -> Result<bool, StoreError> {
+        Ok(self.0.execute("UPDATE meetings SET title = ?2 WHERE id = ?1", params![meeting_id, title])? > 0)
+    }
+
     /// Replaces what is stored for the meeting with the snapshot.
     pub fn save(&mut self, meeting_id: i64, snapshot: &NotesSnapshot) -> Result<(), StoreError> {
         let duration_secs = snapshot.segments.iter().map(|segment| segment.end_secs).fold(0.0, f64::max);
@@ -357,6 +362,15 @@ mod tests {
         shorter.chat.clear();
         store.save(id, &shorter).unwrap();
         assert_eq!(store.load(id).unwrap().unwrap().1, shorter);
+    }
+
+    #[test]
+    fn a_meeting_can_be_renamed() {
+        let store = store();
+        let id = store.create_meeting("Rapat tanpa judul", 1).unwrap();
+        assert!(store.rename(id, "Anggaran").unwrap());
+        assert_eq!(store.load(id).unwrap().unwrap().0.title, "Anggaran");
+        assert!(!store.rename(99, "x").unwrap());
     }
 
     #[test]
