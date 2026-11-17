@@ -145,7 +145,7 @@ fn start_recording(
         return Err("Rekaman sudah berjalan.".into());
     }
     let template = parse_template(template.as_deref().unwrap_or("general"))?;
-    let transcriber = transcriber_from_env()?;
+    let transcriber = transcriber_from_env(&app)?;
     let notes = Arc::new(MeetingNotes::new(models::llm(&app)));
     notes.set_template(template);
     let started_at = unix_now()?;
@@ -281,7 +281,7 @@ fn import_blocking(app: &AppHandle, path: &Path) -> Result<(), String> {
     }
     // Decode first, so that an unreadable file leaves no empty meeting behind.
     let samples = load_recording(path).map_err(|error| error.to_string())?;
-    let transcriber = transcriber_from_env()?;
+    let transcriber = transcriber_from_env(app)?;
     let notes = Arc::new(MeetingNotes::new(models::llm(app)));
 
     let started_at = unix_now()?;
@@ -667,8 +667,8 @@ fn open_meeting(id: i64, app: AppHandle, meeting: State<Meeting>, db: State<Db>)
 /// Chooses the transcription provider from STT_PROVIDER: "openai" (default,
 /// any OpenAI-compatible endpoint), "deepgram" or "whisper" (offline).
 /// Settings come from the environment until the Settings screen exists.
-fn transcriber_from_env() -> Result<Arc<dyn Transcriber>, String> {
-    let language = env_or("STT_LANGUAGE", "id");
+fn transcriber_from_env(app: &AppHandle) -> Result<Arc<dyn Transcriber>, String> {
+    let language = spoken_language(app);
     let provider = env_or("STT_PROVIDER", "openai");
     let transcriber: Arc<dyn Transcriber> = match provider.as_str() {
         "openai" => Arc::new(
@@ -704,6 +704,31 @@ fn local_whisper(language: String) -> Result<Arc<dyn Transcriber>, String> {
 #[cfg(not(feature = "local-whisper"))]
 fn local_whisper(_language: String) -> Result<Arc<dyn Transcriber>, String> {
     Err("Aplikasi ini dibangun tanpa Whisper lokal. Bangun ulang dengan --features local-whisper.".into())
+}
+
+fn language_file(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|dir| dir.join("language.txt"))
+}
+
+/// The language the user chose in the app, else STT_LANGUAGE, else Indonesian.
+fn spoken_language(app: &AppHandle) -> String {
+    language_file(app)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.trim().to_owned())
+        .filter(|code| !code.is_empty())
+        .unwrap_or_else(|| env_or("STT_LANGUAGE", "id"))
+}
+
+#[tauri::command]
+fn get_language(app: AppHandle) -> String {
+    spoken_language(&app)
+}
+
+/// Applies to the next recording or import.
+#[tauri::command]
+fn set_language(code: String, app: AppHandle) -> Result<(), String> {
+    let path = language_file(&app).ok_or("Folder data aplikasi tidak ditemukan.")?;
+    std::fs::write(path, code.trim()).map_err(|error| error.to_string())
 }
 
 fn required_env(name: &str) -> Result<String, String> {
@@ -746,6 +771,8 @@ pub fn run() {
             tray::quit_app,
             tray::get_autostart,
             tray::set_autostart,
+            get_language,
+            set_language,
             search_history,
             import_recording,
             open_meeting,

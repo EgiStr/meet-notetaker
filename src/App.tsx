@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { AskPanel, NotesPanel } from "./AskPanel";
@@ -62,6 +63,17 @@ const PANELS: { id: Panel; label: string }[] = [
   { id: "notes", label: "Catatan" },
 ];
 
+const LANGUAGES: [string, string][] = [
+  ["id", "Bahasa Indonesia"],
+  ["en", "English"],
+  ["ms", "Bahasa Melayu"],
+  ["jw", "Basa Jawa"],
+  ["su", "Basa Sunda"],
+  ["zh", "中文"],
+  ["ja", "日本語"],
+  ["ar", "العربية"],
+];
+
 const BUTTON = "rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50";
 
 export function App() {
@@ -78,6 +90,10 @@ export function App() {
   const [panel, setPanel] = useState<Panel>("summary");
   const modelSettings = useModels();
   const autostart = useAutostart();
+  const [language, setLanguage] = useState("id");
+  useEffect(() => {
+    invoke<string>("get_language").then(setLanguage, () => {});
+  }, []);
   /** The outcome of the last action that is not part of recording, shown like `error`. */
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -262,6 +278,24 @@ export function App() {
                 {TEMPLATES.map((option) => (
                   <option key={option.id} value={option.id}>
                     {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 px-2 py-1.5 text-xs text-zinc-500">
+              Bahasa rapat
+              <select
+                value={language}
+                onChange={(event) => {
+                  setLanguage(event.target.value);
+                  report(invoke("set_language", { code: event.target.value }));
+                }}
+                disabled={status !== "idle"}
+                className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900"
+              >
+                {LANGUAGES.map(([code, name]) => (
+                  <option key={code} value={code}>
+                    {name}
                   </option>
                 ))}
               </select>
