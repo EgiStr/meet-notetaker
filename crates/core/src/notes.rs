@@ -234,6 +234,18 @@ impl MeetingNotes {
         Ok(Some(brief))
     }
 
+    /// A follow-up email for the participants; `None` before anyone spoke.
+    pub fn follow_up_email(&self) -> Result<Option<String>, LlmError> {
+        let prompt = {
+            let state = self.state();
+            if state.segments.is_empty() {
+                return Ok(None);
+            }
+            prompts::follow_up_email(&state.user_notes, &state.mom, &chronological(&state.segments), &state.names)
+        };
+        Ok(Some(self.llm.complete(&prompt)?))
+    }
+
     /// What a line of the transcript means, for someone who did not follow it.
     pub fn explain(&self, text: &str, at_secs: f64) -> Result<String, LlmError> {
         let prompt = {

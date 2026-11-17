@@ -107,6 +107,11 @@ export function catchUp(minutes: number): Promise<string | null> {
   return invoke("catch_up", { minutes });
 }
 
+/** A follow-up email draft for the participants; null before anyone spoke. */
+export function followUpEmail(): Promise<string | null> {
+  return invoke("follow_up_email");
+}
+
 /** What a transcript line means, from the conversation around it. */
 export function explainLine(text: string, atSecs: number): Promise<string> {
   return invoke("explain_line", { text, atSecs });

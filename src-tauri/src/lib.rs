@@ -422,6 +422,16 @@ async fn catch_up(minutes: u32, meeting: State<'_, Meeting>) -> Result<Option<St
         .map_err(|error| error.to_string())
 }
 
+/// A follow-up email for the participants, from the minutes and the transcript.
+#[tauri::command]
+async fn follow_up_email(meeting: State<'_, Meeting>) -> Result<Option<String>, String> {
+    let notes = meeting.notes()?;
+    spawn_blocking(move || notes.follow_up_email())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
 /// Explains one transcript line using the conversation around it.
 #[tauri::command]
 async fn explain_line(text: String, at_secs: f64, meeting: State<'_, Meeting>) -> Result<String, String> {
@@ -615,6 +625,7 @@ pub fn run() {
             suggest_questions,
             catch_up,
             explain_line,
+            follow_up_email,
             ask_library,
             export_meeting,
             delete_meeting,

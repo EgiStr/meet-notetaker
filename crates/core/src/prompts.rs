@@ -197,6 +197,26 @@ rapat ini, dan arti istilah, singkatan, atau nama yang mungkin asing. Gunakan pe
 sebagai konteks dan katakan jika konteksnya belum cukup. Transkrip bisa salah dengar; jika sebuah kata \
 tampak keliru, sebutkan kemungkinan yang dimaksud. Teks biasa, tanpa format Markdown.";
 
+const FOLLOW_UP_SYSTEM: &str = "\
+Anda menulis draf email tindak lanjut rapat atas nama pengguna (\"Saya\" di transkrip). Tulis dalam \
+bahasa Indonesia yang sopan dan ringkas, siap dikirim ke seluruh peserta: baris pertama \"Subjek: \
+…\", lalu sapaan, ringkasan singkat hasil rapat, keputusan, dan daftar tindak lanjut dengan \
+penanggung jawab dan tenggat bila disebut. Hanya gunakan fakta dari MoM dan transkrip; jangan \
+mengarang nama, angka, atau tanggal, dan tulis \"(belum ditentukan)\" bila tidak ada. Akhiri dengan \
+salam penutup tanpa nama. Teks biasa tanpa format Markdown (tanpa tanda * atau #); untuk daftar, \
+awali tiap butir dengan \"- \".";
+
+/// Asks for a ready-to-send follow-up email from the finished minutes.
+pub fn follow_up_email(user_notes: &str, mom: &str, segments: &[TranscriptSegment], names: &SpeakerNames) -> Prompt {
+    let user = format!(
+        "MoM:\n{}\n\nCatatan saya:\n{}\n\nTranskrip:\n{}\n\nTulis draf email tindak lanjut.",
+        or_none(mom),
+        or_none(user_notes),
+        format_transcript(segments, names),
+    );
+    Prompt { system: FOLLOW_UP_SYSTEM.into(), user }
+}
+
 /// How many lines before and after the line to explain are given as context.
 const EXPLAIN_CONTEXT_LINES: usize = 12;
 
@@ -325,6 +345,14 @@ mod tests {
         assert!(prompt.user.contains("kalimat 20") && prompt.user.contains("kalimat 8") && prompt.user.contains("kalimat 32"));
         assert!(!prompt.user.contains("kalimat 7\n") && !prompt.user.contains("kalimat 33"));
         assert!(prompt.user.ends_with("Ucapan yang saya tidak paham: \"kalimat 20\""));
+    }
+
+    #[test]
+    fn the_follow_up_prompt_has_minutes_notes_and_transcript() {
+        let prompt = follow_up_email("kirim sebelum Jumat", "## Ringkasan\n- Anggaran", &[segment(Source::System, 0.0, "Disetujui.")], &no_names());
+        assert!(prompt.user.contains("- Anggaran") && prompt.user.contains("kirim sebelum Jumat"));
+        assert!(prompt.user.contains("[00:00] Lainnya: Disetujui."));
+        assert!(prompt.system.contains("Subjek:"));
     }
 
     #[test]

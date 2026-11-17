@@ -11,6 +11,7 @@ import {
   catchUp,
   exportMeeting,
   explainLine,
+  followUpEmail,
   rebuildMom,
   setTemplate as applyTemplate,
   useBookmarks,
@@ -118,6 +119,17 @@ export function App() {
     }
   }
 
+  const [email, setEmail] = useState<"loading" | { text: string; ok: boolean } | null>(null);
+
+  async function draftEmail() {
+    setEmail("loading");
+    try {
+      setEmail({ text: (await followUpEmail()) ?? "Belum ada ucapan untuk dijadikan email.", ok: true });
+    } catch (reason) {
+      setEmail({ text: String(reason), ok: false });
+    }
+  }
+
   function report(action: Promise<unknown>) {
     setNotice(null);
     action.catch((reason) => setNotice(String(reason)));
@@ -222,9 +234,17 @@ export function App() {
           </button>
         )}
         <button
+          onClick={() => void draftEmail()}
+          disabled={status !== "idle" || meetingId === 0 || segments.length === 0 || email === "loading"}
+          title="Tulis draf email tindak lanjut untuk peserta"
+          className="ml-auto rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
+        >
+          Draf email
+        </button>
+        <button
           onClick={() => void exportToFile()}
           disabled={status !== "idle" || meetingId === 0}
-          className="ml-auto rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
+          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-50"
         >
           Ekspor
         </button>
@@ -299,6 +319,32 @@ export function App() {
             )}
           </div>
           <button onClick={() => setRecap(null)} aria-label="Tutup ringkasan" className="text-indigo-700 hover:text-indigo-950">
+            Tutup
+          </button>
+        </section>
+      )}
+
+      {email && (
+        <section className="flex items-start gap-3 border-b border-zinc-200 bg-zinc-50 px-5 py-3 text-sm">
+          <div className="min-w-0 flex-1">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">Draf email tindak lanjut</p>
+            {email === "loading" ? (
+              <p>Menulis draf…</p>
+            ) : (
+              <p className={`max-h-64 overflow-y-auto whitespace-pre-wrap leading-relaxed ${email.ok ? "" : "text-red-700"}`}>
+                {email.text}
+              </p>
+            )}
+          </div>
+          {email !== "loading" && email.ok && (
+            <button
+              onClick={() => void navigator.clipboard.writeText(email.text).catch((reason) => setNotice(String(reason)))}
+              className="rounded-md border border-zinc-300 px-2 py-0.5 hover:bg-zinc-100"
+            >
+              Salin
+            </button>
+          )}
+          <button onClick={() => setEmail(null)} aria-label="Tutup draf email" className="text-zinc-500 hover:text-zinc-900">
             Tutup
           </button>
         </section>
