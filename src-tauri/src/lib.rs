@@ -15,6 +15,7 @@ use notetaker_core::notes::{Bookmark, LiveBrief, MeetingNotes, NotesSnapshot, Pe
 use notetaker_core::openai_transcriber::{OpenAiSettings, OpenAiTranscriber};
 use notetaker_core::polyvoice_diarizer::PolyvoiceDiarizer;
 use notetaker_core::prompts::MomTemplate;
+use notetaker_core::compress::compress_recordings;
 use notetaker_core::session::{recording_path, EventSink, Session, SessionEvent};
 use notetaker_core::speakers::Diarizer;
 use notetaker_core::store::{MeetingSummary, Store};
@@ -242,6 +243,7 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
         if let Some(notes) = notes {
             if let Some(audio_dir) = audio_dir {
                 label_speakers(&app, &notes, &PolyvoiceDiarizer, &audio_dir);
+                compress_audio(&app, &audio_dir);
             }
             rebuild_and_emit(&app, &notes);
             save_meeting(&app);
@@ -299,6 +301,7 @@ fn import_blocking(app: &AppHandle, path: &Path) -> Result<(), String> {
     });
     // What was transcribed before a failure is still labelled, summarized and kept.
     label_speakers(app, &notes, &PolyvoiceDiarizer, &audio_dir);
+    compress_audio(app, &audio_dir);
     rebuild_and_emit(app, &notes);
     save_meeting(app);
     transcribed.map_err(|error| error.to_string())
@@ -316,6 +319,13 @@ fn label_speakers(app: &AppHandle, notes: &MeetingNotes, diarizer: &dyn Diarizer
             let _ = app.emit(NOTES_EVENT, &NotesEvent::Transcript(notes.transcript()));
         }
         Err(error) => emit_error(app, error),
+    }
+}
+
+/// Shrinks the finished recordings to FLAC. A failure leaves the WAV files in place and is reported.
+fn compress_audio(app: &AppHandle, audio_dir: &Path) {
+    if let Err(error) = compress_recordings(audio_dir) {
+        emit_error(app, error);
     }
 }
 
