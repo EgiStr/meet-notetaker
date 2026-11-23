@@ -686,6 +686,50 @@ fn export_meeting(path: String, utc_offset_secs: i64, meeting: State<Meeting>, d
     std::fs::write(&path, content).map_err(|error| format!("{path}: {error}"))
 }
 
+/// Writes the stretch of the current meeting around a bookmark as one HTML file with the audio
+/// (when the recording is still there) and the words.
+#[tauri::command]
+fn export_clip(index: usize, path: String, meeting: State<Meeting>, db: State<Db>) -> Result<(), String> {
+    use notetaker_core::clip;
+    let (notes, id, audio_dir) = {
+        let state = meeting.state();
+        (state.notes.clone(), state.meeting_id, state.audio_dir.clone())
+    };
+    let (Some(notes), Some(id)) = (notes, id) else {
+        return Err("Belum ada rapat.".into());
+    };
+    let snapshot = notes.snapshot();
+    let bookmark = snapshot.bookmarks.get(index).ok_or("Penanda tidak ditemukan.")?;
+    let title = match db.store().load(id) {
+        Ok(Some((summary, _))) => summary.title,
+        _ => String::new(),
+    };
+    let duration = snapshot.segments.iter().map(|segment| segment.end_secs).fold(0.0, f64::max);
+    let (start, end) = clip::range(bookmark.at_secs, duration);
+
+    let rate = notetaker_core::audio::SAMPLE_RATE;
+    let wav = audio_dir.as_deref().and_then(|dir| {
+        let stream = |source: Source| {
+            let wav = recording_path(dir, source);
+            let file = if wav.exists() { wav } else { wav.with_extension("flac") };
+            notetaker_core::audio_file::read_samples(&file).ok()
+        };
+        let (system, microphone) = (stream(Source::System), stream(Source::Microphone));
+        if system.is_none() && microphone.is_none() {
+            return None;
+        }
+        let piece = |samples: Option<Vec<f32>>| {
+            let samples = samples.unwrap_or_default();
+            let from = ((start * f64::from(rate)) as usize).min(samples.len());
+            let to = ((end * f64::from(rate)) as usize).min(samples.len());
+            samples[from..to].to_vec()
+        };
+        clip::wav_bytes(&clip::mix(&piece(system), &piece(microphone)), rate).ok()
+    });
+    let html = clip::clip_html(&title, &bookmark.label, start, end, &snapshot.segments, &snapshot.names, wav.as_deref());
+    std::fs::write(&path, html).map_err(|error| format!("{path}: {error}"))
+}
+
 /// Talk time and habits of each speaker of the current meeting.
 #[tauri::command]
 fn talk_stats(meeting: State<Meeting>) -> Result<Vec<notetaker_core::analytics::TalkStat>, String> {
@@ -1059,6 +1103,7 @@ pub fn run() {
             export_meeting,
             report_html,
             talk_stats,
+            export_clip,
             relabel_speakers,
             delete_meeting,
             models::get_models,

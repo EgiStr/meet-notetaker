@@ -42,7 +42,7 @@ pub fn raw_json(summary: &MeetingSummary, notes: &NotesSnapshot, utc_offset_secs
     serde_json::to_string_pretty(&document).unwrap_or_default()
 }
 
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 

@@ -150,6 +150,11 @@ export function reportHtml(): Promise<string> {
   return invoke("report_html", { utcOffsetSecs: -new Date().getTimezoneOffset() * 60 });
 }
 
+/** Writes the stretch around a bookmark of the open meeting to `path` as one HTML file. */
+export function exportClip(index: number, path: string): Promise<void> {
+  return invoke("export_clip", { index, path });
+}
+
 export interface TalkStat {
   name: string;
   seconds: number;

@@ -6,6 +6,7 @@ pub mod analytics;
 pub mod audio;
 pub mod capture;
 pub mod chunker;
+pub mod clip;
 pub mod cleanup;
 pub mod compress;
 pub mod deepgram_transcriber;

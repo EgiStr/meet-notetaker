@@ -16,6 +16,7 @@ interface NotesProps {
   savedNotes: string;
   bookmarks: Bookmark[];
   onRemoveBookmark: (index: number) => void;
+  onClipBookmark: (index: number) => void;
 }
 
 /** The user's own notes and the bookmarks. Remount (change `key`) to show another meeting. */
@@ -23,7 +24,7 @@ export function NotesPanel(props: NotesProps) {
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <UserNotes enabled={props.enabled} saved={props.savedNotes} />
-      <Bookmarks bookmarks={props.bookmarks} onRemove={props.onRemoveBookmark} />
+      <Bookmarks bookmarks={props.bookmarks} onRemove={props.onRemoveBookmark} onClip={props.onClipBookmark} />
       <TalkStats enabled={props.enabled} />
     </section>
   );
@@ -118,7 +119,15 @@ function UserNotes({ enabled, saved }: { enabled: boolean; saved: string }) {
   );
 }
 
-function Bookmarks({ bookmarks, onRemove }: { bookmarks: Bookmark[]; onRemove: (index: number) => void }) {
+function Bookmarks({
+  bookmarks,
+  onRemove,
+  onClip,
+}: {
+  bookmarks: Bookmark[];
+  onRemove: (index: number) => void;
+  onClip: (index: number) => void;
+}) {
   if (bookmarks.length === 0) return null;
   return (
     <div className="border-t border-zinc-200">
@@ -128,6 +137,13 @@ function Bookmarks({ bookmarks, onRemove }: { bookmarks: Bookmark[]; onRemove: (
           <li key={`${bookmark.at_secs}-${index}`} className="flex items-baseline gap-2">
             <time className="font-mono tabular-nums text-zinc-500">{formatClock(bookmark.at_secs)}</time>
             <span className="min-w-0 flex-1 truncate">{bookmark.label}</span>
+            <button
+              onClick={() => onClip(index)}
+              title="Simpan klip (audio dan teks) di sekitar penanda ini"
+              className="text-xs text-zinc-500 underline hover:text-zinc-800"
+            >
+              Klip
+            </button>
             <button
               onClick={() => onRemove(index)}
               aria-label={`Hapus penanda ${bookmark.label}`}

@@ -11,6 +11,7 @@ import { notifyAway, quitApp, useAutostart, useMeetingDetected, useShowSummary, 
 import {
   TEMPLATES,
   catchUp,
+  exportClip,
   exportMeeting,
   relabelSpeakers,
   reportHtml,
@@ -256,6 +257,15 @@ export function App() {
     }[kind];
     const path = await save({ defaultPath: `${title.trim() || "rapat"}.${filters[0].extensions[0]}`, filters });
     if (path) report(exportMeeting(path));
+  }
+
+  async function saveClip(index: number) {
+    const label = bookmarks[index]?.label ?? "klip";
+    const path = await save({
+      defaultPath: `${label.slice(0, 40).replace(/[\/:*?"<>|]/g, " ").trim() || "klip"}.html`,
+      filters: [{ name: "Klip (HTML)", extensions: ["html"] }],
+    });
+    if (path) report(exportClip(index, path));
   }
 
   /** Opens the report in a hidden frame and prints it; "Save as PDF" is a printer choice. */
@@ -594,6 +604,7 @@ export function App() {
                 savedNotes={opened?.userNotes ?? ""}
                 bookmarks={bookmarks}
                 onRemoveBookmark={(index) => report(removeBookmark(index))}
+                onClipBookmark={(index) => void saveClip(index)}
               />
             )}
           </aside>
