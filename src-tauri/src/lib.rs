@@ -281,6 +281,7 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
             if let Some(meeting_id) = untitled_id {
                 auto_title(&app, &notes, meeting_id);
             }
+            collect_actions(&app, &notes, true);
             announce_finished(&app, &notes);
             index_in_background(&app);
         }
@@ -369,6 +370,7 @@ fn import_blocking(app: &AppHandle, path: &Path) -> Result<(), String> {
     compress_audio(app, &audio_dir);
     rebuild_and_emit(app, &notes);
     save_meeting(app);
+    collect_actions(app, &notes, true);
     announce_finished(app, &notes);
     index_in_background(app);
     transcribed.map_err(|error| error.to_string())
@@ -728,6 +730,98 @@ fn export_clip(index: usize, path: String, meeting: State<Meeting>, db: State<Db
     });
     let html = clip::clip_html(&title, &bookmark.label, start, end, &snapshot.segments, &snapshot.names, wav.as_deref());
     std::fs::write(&path, html).map_err(|error| format!("{path}: {error}"))
+}
+
+const WEBHOOK_SETTING: &str = "webhook_url";
+
+/// Finds the action items of the current meeting and keeps them, replacing what was kept for it.
+/// With `send`, they also go to the webhook when one is set. A failure is reported and leaves
+/// the meeting as it was.
+fn collect_actions(app: &AppHandle, notes: &MeetingNotes, send: bool) {
+    let Some(id) = app.state::<Meeting>().state().meeting_id else { return };
+    let items = match notes.action_items() {
+        Ok(Some(items)) => items,
+        Ok(None) => return,
+        Err(error) => return emit_error(app, error),
+    };
+    let db = app.state::<Db>();
+    if let Err(error) = db.store().replace_action_items(id, &items) {
+        return emit_error(app, error);
+    }
+    if send {
+        send_to_webhook(app, id, &items);
+    }
+}
+
+fn send_to_webhook(app: &AppHandle, meeting_id: i64, items: &[notetaker_core::actions::ActionDraft]) {
+    let db = app.state::<Db>();
+    let url = db.store().setting(WEBHOOK_SETTING).ok().flatten();
+    let Some(url) = url else { return };
+    let title = match db.store().load(meeting_id) {
+        Ok(Some((summary, _))) => summary.title,
+        _ => String::new(),
+    };
+    if let Err(error) = notetaker_core::actions::send_webhook(&url, &title, items) {
+        emit_error(app, format!("Webhook: {error}"));
+    }
+}
+
+/// Reads the action items of the current meeting again from its transcript.
+#[tauri::command]
+async fn extract_actions(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
+    let notes = meeting.notes()?;
+    spawn_blocking(move || collect_actions(&app, &notes, false)).await.map_err(|error| error.to_string())
+}
+
+/// Sends the kept action items of the current meeting to the webhook.
+#[tauri::command]
+async fn send_actions(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
+    let id = meeting.state().meeting_id.ok_or("Belum ada rapat.")?;
+    spawn_blocking(move || {
+        let db = app.state::<Db>();
+        let url = db.store().setting(WEBHOOK_SETTING).map_err(|e| e.to_string())?.ok_or("Isi alamat webhook dulu.")?;
+        let items: Vec<_> = db
+            .store()
+            .action_items(false)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|item| item.meeting_id == id)
+            .map(|item| notetaker_core::actions::ActionDraft { task: item.task, owner: item.owner, due: item.due })
+            .collect();
+        let title = match db.store().load(id) {
+            Ok(Some((summary, _))) => summary.title,
+            _ => String::new(),
+        };
+        notetaker_core::actions::send_webhook(&url, &title, &items)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Action items across all meetings, open ones first.
+#[tauri::command]
+fn list_actions(include_done: bool, db: State<Db>) -> Result<Vec<notetaker_core::actions::ActionItem>, String> {
+    db.store().action_items(include_done).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_action_done(id: i64, done: bool, db: State<Db>) -> Result<(), String> {
+    db.store().set_action_done(id, done).map(|_| ()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_webhook(db: State<Db>) -> Result<String, String> {
+    db.store().setting(WEBHOOK_SETTING).map(Option::unwrap_or_default).map_err(|error| error.to_string())
+}
+
+/// A blank address turns the webhook off.
+#[tauri::command]
+fn set_webhook(url: String, db: State<Db>) -> Result<(), String> {
+    let url = url.trim();
+    if !url.is_empty() && !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Alamat webhook harus diawali https://".into());
+    }
+    db.store().set_setting(WEBHOOK_SETTING, url).map_err(|error| error.to_string())
 }
 
 /// Talk time and habits of each speaker of the current meeting.
@@ -1103,6 +1197,12 @@ pub fn run() {
             export_meeting,
             report_html,
             talk_stats,
+            extract_actions,
+            send_actions,
+            list_actions,
+            set_action_done,
+            get_webhook,
+            set_webhook,
             export_clip,
             relabel_speakers,
             delete_meeting,

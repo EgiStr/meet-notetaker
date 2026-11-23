@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { AskPanel, NotesPanel } from "./AskPanel";
+import { Actions } from "./Actions";
 import { History } from "./History";
 import { MomPanel } from "./MomPanel";
 import { ModelPicker, Models } from "./Models";
@@ -57,7 +58,7 @@ const SPEAKER_COLOR: Record<Source, string> = {
   system: "text-zinc-700",
 };
 
-type View = "meeting" | "history" | "models";
+type View = "meeting" | "history" | "actions" | "models";
 type Panel = "summary" | "ask" | "notes";
 
 const PANELS: { id: Panel; label: string }[] = [
@@ -262,7 +263,7 @@ export function App() {
   async function saveClip(index: number) {
     const label = bookmarks[index]?.label ?? "klip";
     const path = await save({
-      defaultPath: `${label.slice(0, 40).replace(/[\/:*?"<>|]/g, " ").trim() || "klip"}.html`,
+      defaultPath: `${label.slice(0, 40).replace(/[\\/:*?"<>|]/g, " ").trim() || "klip"}.html`,
       filters: [{ name: "Klip (HTML)", extensions: ["html"] }],
     });
     if (path) report(exportClip(index, path));
@@ -339,6 +340,9 @@ export function App() {
             </NavButton>
             <NavButton active={view === "history"} disabled={status !== "idle"} onClick={() => setView("history")}>
               Riwayat
+            </NavButton>
+            <NavButton active={view === "actions"} disabled={status !== "idle"} onClick={() => setView("actions")}>
+              Tugas
             </NavButton>
           </nav>
           <Menu>
@@ -553,6 +557,8 @@ export function App() {
 
       {view === "models" ? (
         <Models models={modelSettings.models} error={modelSettings.error} apply={modelSettings.apply} />
+      ) : view === "actions" ? (
+        <Actions onOpen={(id) => void openFromHistory(id)} hasMeeting={meetingId > 0} idle={status === "idle"} />
       ) : view === "history" ? (
         <History onOpen={(id) => void openFromHistory(id)} onDeletedCurrent={clear} />
       ) : (

@@ -278,6 +278,18 @@ impl MeetingNotes {
         Ok(prompts::parse_title(&self.llm.complete(&prompt)?))
     }
 
+    /// The action items of the meeting; `None` before anyone spoke.
+    pub fn action_items(&self) -> Result<Option<Vec<crate::actions::ActionDraft>>, LlmError> {
+        let prompt = {
+            let state = self.state();
+            if state.segments.is_empty() {
+                return Ok(None);
+            }
+            crate::actions::prompt(&state.mom, &chronological(&state.segments), &state.names)
+        };
+        Ok(Some(crate::actions::parse(&self.llm.complete(&prompt)?)))
+    }
+
     /// A follow-up email for the participants; `None` before anyone spoke.
     pub fn follow_up_email(&self) -> Result<Option<String>, LlmError> {
         let prompt = {

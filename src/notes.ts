@@ -155,6 +155,43 @@ export function exportClip(index: number, path: string): Promise<void> {
   return invoke("export_clip", { index, path });
 }
 
+export interface ActionItem {
+  id: number;
+  meeting_id: number;
+  meeting_title: string;
+  task: string;
+  owner: string | null;
+  due: string | null;
+  done: boolean;
+}
+
+export function listActions(includeDone: boolean): Promise<ActionItem[]> {
+  return invoke("list_actions", { includeDone });
+}
+
+export function setActionDone(id: number, done: boolean): Promise<void> {
+  return invoke("set_action_done", { id, done });
+}
+
+/** Reads the action items of the open meeting again from its transcript. */
+export function extractActions(): Promise<void> {
+  return invoke("extract_actions");
+}
+
+/** Sends the action items of the open meeting to the webhook. */
+export function sendActions(): Promise<void> {
+  return invoke("send_actions");
+}
+
+export function getWebhook(): Promise<string> {
+  return invoke("get_webhook");
+}
+
+/** A blank address turns the webhook off. */
+export function setWebhook(url: string): Promise<void> {
+  return invoke("set_webhook", { url });
+}
+
 export interface TalkStat {
   name: string;
   seconds: number;

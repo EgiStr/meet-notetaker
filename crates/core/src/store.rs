@@ -6,6 +6,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::actions::{ActionDraft, ActionItem};
 use crate::embed::{cosine, from_bytes, to_bytes};
 use crate::notes::{Bookmark, Exchange, NotesSnapshot};
 use crate::prompts::MomTemplate;
@@ -45,6 +46,18 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
     at_secs    REAL NOT NULL,
     label      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS action_items (
+    id         INTEGER PRIMARY KEY,
+    meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    task       TEXT NOT NULL,
+    owner      TEXT,
+    due        TEXT,
+    done       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS voiceprints (
     name    TEXT PRIMARY KEY,
@@ -98,6 +111,72 @@ impl Store {
             }
         }
         Ok(Self(connection))
+    }
+
+    /// A saved preference; `None` when it was never set.
+    pub fn setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        Ok(self.0.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0)).optional()?)
+    }
+
+    /// A blank value removes the preference.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        if value.trim().is_empty() {
+            self.0.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        } else {
+            self.0.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+                params![key, value.trim()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Replaces the action items of a meeting. An item that was already ticked off stays ticked
+    /// when the new list has the same task.
+    pub fn replace_action_items(&mut self, meeting_id: i64, items: &[ActionDraft]) -> Result<(), StoreError> {
+        let transaction = self.0.transaction()?;
+        let done: Vec<String> = transaction
+            .prepare("SELECT task FROM action_items WHERE meeting_id = ?1 AND done = 1")?
+            .query_map([meeting_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        transaction.execute("DELETE FROM action_items WHERE meeting_id = ?1", [meeting_id])?;
+        for item in items {
+            let ticked = done.iter().any(|task| task.eq_ignore_ascii_case(&item.task));
+            transaction.execute(
+                "INSERT INTO action_items (meeting_id, task, owner, due, done) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![meeting_id, item.task, item.owner, item.due, ticked],
+            )?;
+        }
+        Ok(transaction.commit()?)
+    }
+
+    /// Open items first, then the newest meeting first.
+    pub fn action_items(&self, include_done: bool) -> Result<Vec<ActionItem>, StoreError> {
+        let mut select = self.0.prepare(
+            "SELECT a.id, a.meeting_id, m.title, a.task, a.owner, a.due, a.done
+             FROM action_items a JOIN meetings m ON m.id = a.meeting_id
+             WHERE ?1 OR a.done = 0
+             ORDER BY a.done, m.started_at DESC, a.id",
+        )?;
+        let items = select
+            .query_map([include_done], |row| {
+                Ok(ActionItem {
+                    id: row.get(0)?,
+                    meeting_id: row.get(1)?,
+                    meeting_title: row.get(2)?,
+                    task: row.get(3)?,
+                    owner: row.get(4)?,
+                    due: row.get(5)?,
+                    done: row.get(6)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(items)
+    }
+
+    /// Returns whether the item existed.
+    pub fn set_action_done(&self, id: i64, done: bool) -> Result<bool, StoreError> {
+        Ok(self.0.execute("UPDATE action_items SET done = ?2 WHERE id = ?1", params![id, done])? > 0)
     }
 
     /// Every remembered voice: its name and voiceprint.
@@ -556,5 +635,47 @@ mod tests {
         let store = store();
         store.create_meeting("Rapat", 1).unwrap();
         assert!(store.list("%").unwrap().is_empty());
+    }
+
+    #[test]
+    fn action_items_are_listed_across_meetings_and_keep_their_tick_when_replaced() {
+        let mut store = store();
+        let first = store.create_meeting("Satu", 100).unwrap();
+        let second = store.create_meeting("Dua", 200).unwrap();
+        let draft = |task: &str| ActionDraft { task: task.into(), owner: Some("Budi".into()), due: None };
+        store.replace_action_items(first, &[draft("Kirim laporan"), draft("Siapkan demo")]).unwrap();
+        store.replace_action_items(second, &[draft("Hubungi vendor")]).unwrap();
+        let all = store.action_items(false).unwrap();
+        assert_eq!(all.iter().map(|i| i.task.as_str()).collect::<Vec<_>>(), ["Hubungi vendor", "Kirim laporan", "Siapkan demo"]);
+
+        assert!(store.set_action_done(all[1].id, true).unwrap());
+        assert_eq!(store.action_items(false).unwrap().len(), 2);
+        store.replace_action_items(first, &[draft("kirim laporan"), draft("Baru")]).unwrap();
+        let kept = store.action_items(true).unwrap();
+        assert_eq!(kept.last().map(|i| (i.task.as_str(), i.done)), Some(("kirim laporan", true)));
+        assert!(!store.set_action_done(9999, true).unwrap());
+    }
+
+    #[test]
+    fn settings_are_kept_until_set_blank() {
+        let store = store();
+        assert_eq!(store.setting("webhook").unwrap(), None);
+        store.set_setting("webhook", " https://x.test/hook ").unwrap();
+        assert_eq!(store.setting("webhook").unwrap().as_deref(), Some("https://x.test/hook"));
+        store.set_setting("webhook", "  ").unwrap();
+        assert_eq!(store.setting("webhook").unwrap(), None);
+    }
+
+    #[test]
+    fn a_remembered_voice_is_mixed_with_the_next_one_of_the_same_name() {
+        let store = store();
+        store.remember_voice("Budi", &[1.0, 0.0]).unwrap();
+        store.remember_voice("Budi", &[0.0, 1.0]).unwrap();
+        store.remember_voice("Ani", &[0.0, 1.0]).unwrap();
+        let prints = store.voiceprints().unwrap();
+        assert_eq!(prints.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["Ani", "Budi"]);
+        assert!((prints[1].1[0] - prints[1].1[1]).abs() < 1e-5);
+        assert!(store.forget_voice("Ani").unwrap());
+        assert!(!store.forget_voice("Ani").unwrap());
     }
 }
