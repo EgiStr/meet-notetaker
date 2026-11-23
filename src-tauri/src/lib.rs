@@ -416,7 +416,10 @@ fn label_speakers(app: &AppHandle, notes: &MeetingNotes, diarizer: &dyn Diarizer
     if !notes.transcript().iter().any(|segment| segment.source == Source::System) {
         return;
     }
-    match diarizer.diarize(&recording_path(audio_dir, Source::System)) {
+    // After the meeting the recording has been compressed to FLAC.
+    let wav = recording_path(audio_dir, Source::System);
+    let recording = if wav.exists() { wav } else { wav.with_extension("flac") };
+    match diarizer.diarize(&recording) {
         Ok(turns) => {
             notes.apply_speaker_turns(&turns);
             let _ = app.emit(NOTES_EVENT, &NotesEvent::Transcript(notes.transcript()));
