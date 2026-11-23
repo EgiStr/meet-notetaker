@@ -14,6 +14,12 @@ Dibangun dengan Rust (Tauri 2) dan React. Desain lengkap ada di [docs/PRD.md](do
 - Label pembicara otomatis (diarization): mikrofon = "Saya", suara lain di rapat = Pembicara 1, 2, 3 …; namanya bisa diubah. Suara yang hanya bicara sebentar digabung ke pembicara terdekat agar jumlahnya masuk akal. Rekaman lebih dari satu jam (rapat panjang) kini juga dipisah suaranya dan ditranskrip ulang.
 - Template MoM "Formal (lengkap)": Executive Summary, Agenda dan Pembahasan, Keputusan (tabel), Action Items (tabel PIC dan waktu), Risiko, Rekomendasi, Glosarium, Keterbatasan Transkrip. Menu ⋯ → Ekspor MoM sebagai PDF (lewat dialog cetak → "Save as PDF") atau HTML; Ekspor transkrip / data mentah menyimpan .txt atau .json.
 - Layanan transkripsi (Groq, OpenAI, server kompatibel, atau Deepgram) diatur di layar Model → Transkripsi; kunci API disimpan di Windows Credential Manager. Tanpa itu, variabel `STT_*` masih berlaku. Aplikasi hasil installer jadi bisa mentranskripsi tanpa variabel lingkungan.
+- Suara diingat: begitu satu pembicara diberi nama, sidik suaranya disimpan (hanya di komputer ini) dan rapat berikutnya memberinya nama itu otomatis setelah rapat selesai.
+- Porsi bicara per orang (waktu, kata per menit, pertanyaan, monolog terpanjang) di panel Catatan.
+- Klip: di panel Catatan, tombol **Klip** pada sebuah penanda menyimpan 15 detik sebelum dan 45 detik sesudahnya sebagai satu halaman HTML berisi audio dan teks, mudah dikirim.
+- Tugas dari semua rapat di tab **Tugas**: dicari otomatis setelah rapat selesai, bisa dicentang dan disaring per orang. Alamat webhook (Slack/Discord, Zapier, Make, n8n, atau automasi Notion dan Jira) menerima tugasnya sebagai JSON.
+- Template MoM buatan sendiri (layar Model): tulis bagian dan petunjuknya, lalu pilih "Buatan saya" di Jenis rapat.
+- Kalender lewat alamat iCal (.ics), tanpa login (layar Model): rapat tanpa judul memakai nama jadwal yang sedang berjalan, dan peserta undangan muncul sebagai saran nama pembicara. Jadwal berulang harian dan mingguan didukung; zona waktu selain UTC dan zona lokal dibaca sebagai waktu lokal.
 - Riwayat rapat (SQLite), pencarian, tanya ke semua rapat, penanda, ekspor Markdown, hapus.
 - Impor rekaman audio yang sudah ada.
 - Pintasan global Ctrl+Alt+R untuk mulai/berhenti merekam, notifikasi Windows saat nama Anda disebut, pengingat (atau rekam otomatis, bila diaktifkan di menu ⋯) saat rapat Google Meet, Zoom, atau Teams terbuka, dan notifikasi ringkasan setelah rapat selesai.
