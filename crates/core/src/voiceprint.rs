@@ -11,13 +11,13 @@ use crate::embed::cosine;
 use crate::transcript::{Source, TranscriptSegment};
 
 /// Cosine similarity from which two voiceprints are taken to be the same person.
-pub const MATCH_THRESHOLD: f32 = 0.55;
+pub const MATCH_THRESHOLD: f32 = 0.65;
 /// Pieces shorter than this give unreliable embeddings.
 const MIN_PIECE_SECS: f64 = 1.5;
 /// Longest stretch embedded at once.
 const MAX_PIECE_SECS: f64 = 12.0;
 /// A voiceprint is built from this much speech at most; more only costs time.
-const MAX_SPEECH_SECS: f64 = 90.0;
+const MAX_SPEECH_SECS: f64 = 45.0;
 
 /// Turns audio into an embedding, so that tests need no model.
 pub trait Embed {

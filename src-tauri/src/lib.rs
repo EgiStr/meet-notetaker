@@ -487,8 +487,13 @@ fn rename_speaker(speaker: u32, name: String, app: AppHandle, meeting: State<Mee
     let name = name.trim().to_owned();
     if let (Some(audio_dir), false) = (audio_dir, name.is_empty()) {
         std::thread::spawn(move || {
-            if let Some(print) = voice_prints(&notes, &audio_dir).and_then(|mut prints| prints.remove(&speaker)) {
-                let _ = app.state::<Db>().store().remember_voice(&name, &print);
+            match voice_prints(&notes, &audio_dir).and_then(|mut prints| prints.remove(&speaker)) {
+                Some(print) => {
+                    if let Err(error) = app.state::<Db>().store().remember_voice(&name, &print) {
+                        eprintln!("suara: {error}");
+                    }
+                }
+                None => eprintln!("suara: tidak ada cukup ucapan {name} untuk diingat"),
             }
         });
     }
