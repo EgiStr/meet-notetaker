@@ -16,6 +16,8 @@ pub enum MomTemplate {
     OneOnOne,
     Sales,
     Retro,
+    /// The full minutes document: summary, agenda discussion, decisions and action items in tables, risks, glossary.
+    Formal,
 }
 
 impl MomTemplate {
@@ -26,6 +28,7 @@ impl MomTemplate {
             "one_on_one" => Self::OneOnOne,
             "sales" => Self::Sales,
             "retro" => Self::Retro,
+            "formal" => Self::Formal,
             _ => return None,
         })
     }
@@ -37,6 +40,7 @@ impl MomTemplate {
             Self::OneOnOne => "one_on_one",
             Self::Sales => "sales",
             Self::Retro => "retro",
+            Self::Formal => "formal",
         }
     }
 
@@ -47,10 +51,16 @@ impl MomTemplate {
             Self::OneOnOne => &["Ringkasan", "Kabar dan Masukan", "Tujuan dan Pengembangan", "Action Items"],
             Self::Sales => &["Ringkasan", "Kebutuhan Pelanggan", "Keberatan", "Langkah Berikutnya", "Action Items"],
             Self::Retro => &["Berjalan Baik", "Perlu Diperbaiki", "Pembelajaran", "Action Items"],
+            Self::Formal => &[],
         }
     }
 
     fn system_prompt(self) -> String {
+        if self == Self::Formal {
+            return format!("{FORMAL_HEAD}
+{MOM_RULES}
+{FORMAL_EXTRA_RULES}");
+        }
         let sections = self.sections();
         let headings: String = sections.iter().map(|section| format!("## {section}\n")).collect();
         format!(
@@ -60,6 +70,32 @@ dengan tepat {} bagian berikut dan urutan ini:\n\n{headings}\n{MOM_RULES}",
         )
     }
 }
+
+/// The structure of a full minutes document, as in a formal "Minutes of Meeting" file.
+const FORMAL_HEAD: &str = "Anda notulis rapat. Tulis notulen formal (MoM) dalam bahasa Indonesia, berformat Markdown, dengan bagian-bagian berikut dan urutan ini (judul persis seperti tertulis):
+
+## 1. Executive Summary
+Butir \"- \" dengan awalan tebal, misalnya \"- **Topik:** inti pembahasan dan hasilnya\".
+## 2. Agenda dan Pembahasan
+Satu subbagian \"### 2.1 Nama topik\", \"### 2.2 ...\" per topik utama, masing-masing berisi butir \"- \". Bila perlu, akhiri subbagian dengan satu kutipan \"> **Kesepahaman sementara:** ...\", \"> **Belum diputuskan:** ...\", atau \"> **Ketergantungan utama:** ...\".
+## 3. Keputusan dan Kesepahaman Sementara
+Tabel Markdown dengan kolom: | Topik | Kesepahaman / status |
+## 4. Action Items
+Tabel Markdown dengan kolom: | # | Tindak lanjut | PIC/kolaborator | Waktu/status |. PIC ditulis dari nama atau label pembicara bila jelas, atau dari peran/tim; tulis \"belum ditetapkan\" bila tidak disebut.
+## 5. Risiko, Dependensi, dan Hal yang Belum Terjawab
+Subbagian \"### A. Nama\", \"### B. ...\" berisi butir \"- \".
+## 6. Rekomendasi Penguatan Handoff (Interpretasi)
+Butir \"- **Topik:** saran\". Ini interpretasi Anda; tandai jelas bahwa ini saran, bukan hasil rapat.
+## 7. Glosarium dan Validasi Istilah
+Butir \"- **Istilah:** arti dari konteks rapat, atau catatan bahwa penulisannya perlu dikonfirmasi\".
+## 8. Keterbatasan Transkrip
+Butir \"- \" tentang kualitas transkrip: label pembicara, kata atau nama yang diduga salah dengar, bagian yang tidak terbaca atau tidak relevan.
+
+";
+
+const FORMAL_EXTRA_RULES: &str = "- Untuk template ini, action item dan keputusan ditulis sebagai baris tabel, bukan butir \"[penanggung jawab] tugas\".
+- Tabel harus memakai baris pemisah Markdown (| --- | --- |), satu baris tabel per butir.
+- Bagian yang tidak ada isinya tetap ditulis dengan satu butir \"- (belum ada)\".";
 
 const MOM_RULES: &str = "\
 Aturan:
@@ -442,7 +478,14 @@ mod tests {
     #[test]
     fn template_ids_round_trip() {
         for template in
-            [MomTemplate::General, MomTemplate::Standup, MomTemplate::OneOnOne, MomTemplate::Sales, MomTemplate::Retro]
+            [
+                MomTemplate::General,
+                MomTemplate::Standup,
+                MomTemplate::OneOnOne,
+                MomTemplate::Sales,
+                MomTemplate::Retro,
+                MomTemplate::Formal,
+            ]
         {
             assert_eq!(MomTemplate::from_id(template.id()), Some(template));
         }

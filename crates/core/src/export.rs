@@ -58,7 +58,7 @@ pub fn format_date(unix_secs: i64, utc_offset_secs: i64) -> String {
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", secs_of_day / 3600, secs_of_day % 3600 / 60)
 }
 
-fn clock(secs: f64) -> String {
+pub(crate) fn clock(secs: f64) -> String {
     let whole = secs.max(0.0) as u64;
     format!("{:02}:{:02}", whole / 60, whole % 60)
 }

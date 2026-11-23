@@ -92,6 +92,7 @@ export const TEMPLATES = [
   { id: "one_on_one", label: "1:1" },
   { id: "sales", label: "Penjualan" },
   { id: "retro", label: "Retrospektif" },
+  { id: "formal", label: "Formal (lengkap)" },
 ] as const;
 
 export function setTemplate(template: string): Promise<void> {
@@ -142,6 +143,11 @@ export function askLibrary(question: string): Promise<LibraryAnswer> {
 /** Writes the current meeting to `path` as Markdown. */
 export function exportMeeting(path: string): Promise<void> {
   return invoke("export_meeting", { path, utcOffsetSecs: -new Date().getTimezoneOffset() * 60 });
+}
+
+/** The meeting as a printable report document (HTML). */
+export function reportHtml(): Promise<string> {
+  return invoke("report_html", { utcOffsetSecs: -new Date().getTimezoneOffset() * 60 });
 }
 
 /** Returns whether the deleted meeting was the current one. */

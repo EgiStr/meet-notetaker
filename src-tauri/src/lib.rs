@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use notetaker_core::audio::WavRecorder;
 use notetaker_core::deepgram_transcriber::{DeepgramSettings, DeepgramTranscriber};
 use notetaker_core::export;
+use notetaker_core::report;
 use notetaker_core::import::{load_recording, refine_stream, transcribe_recording};
 use notetaker_core::library;
 use notetaker_core::llm::LlmError;
@@ -587,8 +588,34 @@ fn export_meeting(path: String, utc_offset_secs: i64, meeting: State<Meeting>, d
         .load(id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Rapat tidak ditemukan.".to_string())?;
-    std::fs::write(&path, export::markdown(&summary, &notes.snapshot(), utc_offset_secs))
-        .map_err(|error| format!("{path}: {error}"))
+    let snapshot = notes.snapshot();
+    // The file type decides what is written: the report, the raw transcript, or all raw data.
+    let extension = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let content = match extension.as_str() {
+        "html" | "htm" => report::report_html(&summary, &snapshot, utc_offset_secs),
+        "txt" => report::transcript_text(&summary, &snapshot, utc_offset_secs),
+        "json" => report::raw_json(&summary, &snapshot, utc_offset_secs),
+        _ => export::markdown(&summary, &snapshot, utc_offset_secs),
+    };
+    std::fs::write(&path, content).map_err(|error| format!("{path}: {error}"))
+}
+
+/// The current meeting as the report document, for printing to PDF from the window.
+#[tauri::command]
+fn report_html(utc_offset_secs: i64, meeting: State<Meeting>, db: State<Db>) -> Result<String, String> {
+    let (notes, id) = {
+        let state = meeting.state();
+        (state.notes.clone(), state.meeting_id)
+    };
+    let (Some(notes), Some(id)) = (notes, id) else {
+        return Err("Belum ada rapat.".into());
+    };
+    let (summary, _) = db
+        .store()
+        .load(id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Rapat tidak ditemukan.".to_string())?;
+    Ok(report::report_html(&summary, &notes.snapshot(), utc_offset_secs))
 }
 
 /// Removes a meeting and its recordings for good. Returns whether it was the current meeting.
@@ -915,6 +942,7 @@ pub fn run() {
             follow_up_email,
             ask_library,
             export_meeting,
+            report_html,
             delete_meeting,
             models::get_models,
             models::save_provider,

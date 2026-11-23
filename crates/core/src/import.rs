@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::audio::{samples_to_seconds, SAMPLE_RATE};
+use crate::audio::samples_to_seconds;
 use crate::chunker::{Chunk, Chunker, ChunkerConfig};
 use crate::transcript::{AudioChunk, Source, TranscribeError, Transcriber, TranscriptSegment};
 
@@ -23,11 +23,7 @@ pub struct DecodeError {
 /// Decodes an audio file (wav, mp3, flac, ogg, m4a) to 16 kHz mono samples.
 pub fn load_recording(path: &Path) -> Result<Vec<f32>, DecodeError> {
     let failed = |reason: String| DecodeError { path: path.display().to_string(), reason };
-    let (samples, rate) = polyvoice::wav::load_audio(path).map_err(|error| failed(error.to_string()))?;
-    if rate != SAMPLE_RATE {
-        return Err(failed(format!("decoded at {rate} Hz instead of {SAMPLE_RATE} Hz")));
-    }
-    Ok(samples)
+    crate::audio_file::read_samples(path).map_err(failed)
 }
 
 /// A file is sent in pieces of up to a minute: few enough requests to stay

@@ -12,6 +12,7 @@ import {
   TEMPLATES,
   catchUp,
   exportMeeting,
+  reportHtml,
   explainLine,
   followUpEmail,
   rebuildMom,
@@ -242,12 +243,32 @@ export function App() {
     report(addBookmark(segments.at(-1)?.text.slice(0, 80) ?? "", null));
   }
 
-  async function exportToFile() {
-    const path = await save({
-      defaultPath: `${title.trim() || "rapat"}.md`,
-      filters: [{ name: "Markdown", extensions: ["md"] }],
-    });
+  /** The file type picked in the dialog decides what is written: md, html (report), txt or json (raw). */
+  async function exportToFile(kind: "md" | "html" | "raw") {
+    const filters = {
+      md: [{ name: "Markdown", extensions: ["md"] }],
+      html: [{ name: "Laporan MoM (HTML)", extensions: ["html"] }],
+      raw: [
+        { name: "Transkrip mentah (teks)", extensions: ["txt"] },
+        { name: "Data mentah (JSON)", extensions: ["json"] },
+      ],
+    }[kind];
+    const path = await save({ defaultPath: `${title.trim() || "rapat"}.${filters[0].extensions[0]}`, filters });
     if (path) report(exportMeeting(path));
+  }
+
+  /** Opens the report in a hidden frame and prints it; "Save as PDF" is a printer choice. */
+  async function printReport() {
+    const html = await reportHtml();
+    const frame = document.createElement("iframe");
+    frame.style.cssText = "position:fixed;width:0;height:0;border:0;visibility:hidden";
+    frame.srcdoc = html;
+    frame.onload = () => {
+      frame.contentWindow?.focus();
+      frame.contentWindow?.print();
+      setTimeout(() => frame.remove(), 60_000);
+    };
+    document.body.appendChild(frame);
   }
 
   async function importRecording() {
@@ -376,8 +397,17 @@ export function App() {
             <MenuItem onClick={() => void importRecording()} disabled={status !== "idle"}>
               Impor rekaman…
             </MenuItem>
-            <MenuItem onClick={() => void exportToFile()} disabled={status !== "idle" || meetingId === 0}>
+            <MenuItem onClick={() => report(printReport())} disabled={status !== "idle" || meetingId === 0}>
+              Ekspor MoM sebagai PDF…
+            </MenuItem>
+            <MenuItem onClick={() => void exportToFile("html")} disabled={status !== "idle" || meetingId === 0}>
+              Ekspor MoM sebagai HTML…
+            </MenuItem>
+            <MenuItem onClick={() => void exportToFile("md")} disabled={status !== "idle" || meetingId === 0}>
               Ekspor sebagai Markdown…
+            </MenuItem>
+            <MenuItem onClick={() => void exportToFile("raw")} disabled={status !== "idle" || meetingId === 0}>
+              Ekspor transkrip / data mentah…
             </MenuItem>
             <MenuItem onClick={() => void draftEmail()} disabled={status !== "idle" || !hasMeeting || email === "loading"}>
               Tulis email tindak lanjut
