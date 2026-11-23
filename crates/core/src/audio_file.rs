@@ -31,13 +31,38 @@ pub fn read_samples(path: &Path) -> Result<Vec<f32>, String> {
 
 const NOT_OURS: &str = "not 16 kHz mono 16-bit";
 
+/// Reads the PCM of a canonical WAV file by hand, so that a recording that is still being
+/// written (its header has no length yet) can be read up to what has reached the disk.
 fn read_wav(path: &Path) -> Option<Result<Vec<f32>, String>> {
-    let mut reader = hound::WavReader::open(path).ok()?;
-    let spec = reader.spec();
-    if spec.channels != 1 || spec.sample_rate != SAMPLE_RATE || spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 {
-        return Some(Err(NOT_OURS.into()));
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
     }
-    Some(reader.samples::<i16>().map(|s| s.map(|v| f32::from(v) / 32768.0).map_err(|e| e.to_string())).collect())
+    let (mut offset, mut format_ok) = (12, false);
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let declared = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().ok()?) as usize;
+        let body = offset + 8;
+        if id == b"fmt " && body + 16 <= bytes.len() {
+            let field = |at: usize| u16::from_le_bytes([bytes[body + at], bytes[body + at + 1]]);
+            let rate = u32::from_le_bytes(bytes[body + 4..body + 8].try_into().ok()?);
+            format_ok = field(0) == 1 && field(2) == 1 && rate == SAMPLE_RATE && field(14) == 16;
+        } else if id == b"data" {
+            if !format_ok {
+                return Some(Err(NOT_OURS.into()));
+            }
+            let available = bytes.len() - body;
+            // Zero (still recording) or too long a length means "until the end of the file".
+            let length = if declared == 0 || declared > available { available } else { declared };
+            let samples = bytes[body..body + length]
+                .chunks_exact(2)
+                .map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / 32768.0)
+                .collect();
+            return Some(Ok(samples));
+        }
+        offset = body + declared + (declared & 1);
+    }
+    None
 }
 
 fn read_flac(path: &Path) -> Option<Result<Vec<f32>, String>> {
@@ -52,6 +77,20 @@ fn read_flac(path: &Path) -> Option<Result<Vec<f32>, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wav_still_being_written_is_read_up_to_what_is_there() {
+        let dir = std::env::temp_dir().join("notetaker-audio-file-growing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("growing.wav");
+        let mut recorder = crate::audio::WavRecorder::create(&wav).unwrap();
+        recorder.write(&vec![0.25; 40_000]).unwrap();
+        // Not finished: the header holds no length. Whatever was flushed is readable.
+        let samples = read_samples(&wav).unwrap();
+        assert!(samples.len() <= 40_000 && samples.iter().all(|s| (s - 0.25).abs() < 0.001));
+        recorder.finish().unwrap();
+        assert_eq!(read_samples(&wav).unwrap().len(), 40_000);
+    }
 
     #[test]
     fn a_wav_and_its_flac_read_back_the_same_samples() {

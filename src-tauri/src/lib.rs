@@ -12,6 +12,7 @@ use notetaker_core::report;
 use notetaker_core::import::{load_recording, refine_stream, transcribe_recording};
 use notetaker_core::library;
 use notetaker_core::llm::LlmError;
+use notetaker_core::live_speakers::LiveSpeakers;
 use notetaker_core::notes::{Bookmark, LiveBrief, MeetingNotes, NotesSnapshot, PeriodicMom};
 use notetaker_core::openai_transcriber::{OpenAiSettings, OpenAiTranscriber};
 use notetaker_core::compress::compress_recordings;
@@ -32,6 +33,8 @@ mod tray;
 
 const SESSION_EVENT: &str = "session-event";
 const NOTES_EVENT: &str = "notes-event";
+/// How often the voices heard so far are told apart again during a recording.
+const SPEAKERS_INTERVAL: Duration = Duration::from_secs(45);
 const MOM_INTERVAL: Duration = Duration::from_secs(120);
 /// How often the live brief is refreshed and how far back it looks; with the minutes and the
 /// question suggestions this stays under the free Gemini limit of 5 requests a minute.
@@ -60,6 +63,7 @@ struct MeetingState {
     session: Option<Session>,
     periodic_mom: Option<PeriodicMom>,
     live_brief: Option<LiveBrief>,
+    live_speakers: Option<LiveSpeakers>,
     /// The running recording was started without a title and gets one when it ends.
     untitled: bool,
     /// Kept after the recording stops so that questions can still be asked.
@@ -174,7 +178,7 @@ fn start_recording(
     ));
     state.audio_dir = Some(audio_dir);
     state.started = Some(Instant::now());
-    let (suggesting, brief_app) = (notes.clone(), app.clone());
+    let (suggesting, brief_app, speakers_app) = (notes.clone(), app.clone(), app.clone());
     state.periodic_mom = Some(PeriodicMom::start(notes.clone(), MOM_INTERVAL, move |result| {
         let updated = result.is_ok();
         emit_mom(&app, result);
@@ -189,6 +193,18 @@ fn start_recording(
             let _ = brief_app.emit(NOTES_EVENT, &NotesEvent::Brief(brief));
         }
     }));
+    let speaker_notes = notes.clone();
+    state.live_speakers = state.audio_dir.as_ref().map(|dir| {
+        LiveSpeakers::start(
+            notes.clone(),
+            recording_path(dir, Source::System),
+            Arc::new(PolyvoiceDiarizer),
+            SPEAKERS_INTERVAL,
+            move || {
+                let _ = speakers_app.emit(NOTES_EVENT, &NotesEvent::Transcript(speaker_notes.transcript()));
+            },
+        )
+    });
     state.notes = Some(notes);
     state.meeting_id = Some(meeting_id);
     state.untitled = untitled;
@@ -226,7 +242,7 @@ fn unix_now() -> Result<i64, String> {
 /// and the final minutes were attempted.
 #[tauri::command]
 async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
-    let (session, periodic_mom, live_brief, notes, audio_dir, untitled_id) = {
+    let (session, periodic_mom, live_brief, live_speakers, notes, audio_dir, untitled_id) = {
         let mut state = meeting.state();
         state.started = None;
         let untitled_id = if std::mem::take(&mut state.untitled) { state.meeting_id } else { None };
@@ -234,6 +250,7 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
             state.session.take(),
             state.periodic_mom.take(),
             state.live_brief.take(),
+            state.live_speakers.take(),
             state.notes.clone(),
             state.audio_dir.clone(),
             untitled_id,
@@ -249,6 +266,9 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
         if let Some(live_brief) = live_brief {
             live_brief.stop();
         }
+        if let Some(live_speakers) = live_speakers {
+            live_speakers.stop();
+        }
         if let Some(notes) = notes {
             if let Some(audio_dir) = audio_dir {
                 refine_transcript(&app, &notes, &audio_dir);
@@ -263,6 +283,28 @@ async fn stop_recording(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(
             announce_finished(&app, &notes);
             index_in_background(&app);
         }
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Tells the voices of the current (finished) meeting apart again, for meetings recorded before
+/// the labels were reliable. The recording is kept, so this can be repeated.
+#[tauri::command]
+async fn relabel_speakers(app: AppHandle, meeting: State<'_, Meeting>) -> Result<(), String> {
+    let (notes, audio_dir) = {
+        let state = meeting.state();
+        if state.session.is_some() {
+            return Err("Hentikan rekaman dulu.".into());
+        }
+        (state.notes.clone(), state.audio_dir.clone())
+    };
+    let (Some(notes), Some(audio_dir)) = (notes, audio_dir) else {
+        return Err("Belum ada rapat.".into());
+    };
+    spawn_blocking(move || {
+        label_speakers(&app, &notes, &PolyvoiceDiarizer, &audio_dir);
+        save_meeting(&app);
     })
     .await
     .map_err(|error| error.to_string())
@@ -943,6 +985,7 @@ pub fn run() {
             ask_library,
             export_meeting,
             report_html,
+            relabel_speakers,
             delete_meeting,
             models::get_models,
             models::save_provider,

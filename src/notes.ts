@@ -150,6 +150,11 @@ export function reportHtml(): Promise<string> {
   return invoke("report_html", { utcOffsetSecs: -new Date().getTimezoneOffset() * 60 });
 }
 
+/** Tells the voices of the open meeting apart again from its recording. */
+export function relabelSpeakers(): Promise<void> {
+  return invoke("relabel_speakers");
+}
+
 /** Returns whether the deleted meeting was the current one. */
 export function deleteMeeting(id: number): Promise<boolean> {
   return invoke("delete_meeting", { id });

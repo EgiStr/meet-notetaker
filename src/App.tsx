@@ -12,6 +12,7 @@ import {
   TEMPLATES,
   catchUp,
   exportMeeting,
+  relabelSpeakers,
   reportHtml,
   explainLine,
   followUpEmail,
@@ -408,6 +409,9 @@ export function App() {
             </MenuItem>
             <MenuItem onClick={() => void exportToFile("raw")} disabled={status !== "idle" || meetingId === 0}>
               Ekspor transkrip / data mentah…
+            </MenuItem>
+            <MenuItem onClick={() => report(relabelSpeakers())} disabled={status !== "idle" || meetingId === 0}>
+              Pisahkan suara pembicara ulang
             </MenuItem>
             <MenuItem onClick={() => void draftEmail()} disabled={status !== "idle" || !hasMeeting || email === "loading"}>
               Tulis email tindak lanjut

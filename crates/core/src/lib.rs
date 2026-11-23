@@ -12,6 +12,7 @@ pub mod embed;
 pub mod export;
 pub mod import;
 pub mod library;
+pub mod live_speakers;
 pub mod llm;
 pub mod notes;
 pub mod openai_llm;
