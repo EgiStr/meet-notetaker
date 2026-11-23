@@ -150,6 +150,22 @@ export function reportHtml(): Promise<string> {
   return invoke("report_html", { utcOffsetSecs: -new Date().getTimezoneOffset() * 60 });
 }
 
+export interface TalkStat {
+  name: string;
+  seconds: number;
+  share: number;
+  lines: number;
+  words: number;
+  questions: number;
+  longest_secs: number;
+  words_per_minute: number;
+}
+
+/** Talk time and habits of each speaker of the open meeting. */
+export function talkStats(): Promise<TalkStat[]> {
+  return invoke("talk_stats");
+}
+
 /** Tells the voices of the open meeting apart again from its recording. */
 export function relabelSpeakers(): Promise<void> {
   return invoke("relabel_speakers");

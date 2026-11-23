@@ -1,6 +1,7 @@
 import { type FormEvent, useState } from "react";
 import { type Bookmark, ask, expandNotes, setUserNotes, suggestQuestions } from "./notes";
 import { formatClock } from "./recording";
+import { TalkStats } from "./TalkStats";
 
 interface Exchange {
   question: string;
@@ -23,6 +24,7 @@ export function NotesPanel(props: NotesProps) {
     <section className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <UserNotes enabled={props.enabled} saved={props.savedNotes} />
       <Bookmarks bookmarks={props.bookmarks} onRemove={props.onRemoveBookmark} />
+      <TalkStats enabled={props.enabled} />
     </section>
   );
 }

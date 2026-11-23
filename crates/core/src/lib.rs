@@ -2,6 +2,7 @@
 //! capture -> downsample -> chunker -> Transcriber -> SessionEvent,
 //! and MeetingNotes, which turns the transcript into minutes and answers.
 
+pub mod analytics;
 pub mod audio;
 pub mod capture;
 pub mod chunker;

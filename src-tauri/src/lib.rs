@@ -686,6 +686,13 @@ fn export_meeting(path: String, utc_offset_secs: i64, meeting: State<Meeting>, d
     std::fs::write(&path, content).map_err(|error| format!("{path}: {error}"))
 }
 
+/// Talk time and habits of each speaker of the current meeting.
+#[tauri::command]
+fn talk_stats(meeting: State<Meeting>) -> Result<Vec<notetaker_core::analytics::TalkStat>, String> {
+    let snapshot = meeting.notes()?.snapshot();
+    Ok(notetaker_core::analytics::talk_stats(&snapshot.segments, &snapshot.names))
+}
+
 /// The current meeting as the report document, for printing to PDF from the window.
 #[tauri::command]
 fn report_html(utc_offset_secs: i64, meeting: State<Meeting>, db: State<Db>) -> Result<String, String> {
@@ -1051,6 +1058,7 @@ pub fn run() {
             ask_library,
             export_meeting,
             report_html,
+            talk_stats,
             relabel_speakers,
             delete_meeting,
             models::get_models,
