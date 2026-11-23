@@ -417,16 +417,45 @@ fn label_speakers(app: &AppHandle, notes: &MeetingNotes, diarizer: &dyn Diarizer
     if !notes.transcript().iter().any(|segment| segment.source == Source::System) {
         return;
     }
-    // After the meeting the recording has been compressed to FLAC.
-    let wav = recording_path(audio_dir, Source::System);
-    let recording = if wav.exists() { wav } else { wav.with_extension("flac") };
-    match diarizer.diarize(&recording) {
+    match diarizer.diarize(&system_recording(audio_dir)) {
         Ok(turns) => {
             notes.apply_speaker_turns(&turns);
+            recognize_voices(app, notes, audio_dir);
             let _ = app.emit(NOTES_EVENT, &NotesEvent::Transcript(notes.transcript()));
         }
         Err(error) => emit_error(app, error),
     }
+}
+
+/// After the meeting the recording has been compressed to FLAC.
+fn system_recording(audio_dir: &Path) -> PathBuf {
+    let wav = recording_path(audio_dir, Source::System);
+    if wav.exists() { wav } else { wav.with_extension("flac") }
+}
+
+/// Gives the voices that were named in earlier meetings their names. A name the user already
+/// gave in this meeting is kept. A failure only means the voices stay "Pembicara n".
+fn recognize_voices(app: &AppHandle, notes: &MeetingNotes, audio_dir: &Path) {
+    let known = match app.state::<Db>().store().voiceprints() {
+        Ok(known) if !known.is_empty() => known,
+        _ => return,
+    };
+    let Some(prints) = voice_prints(notes, audio_dir) else { return };
+    let snapshot = notes.snapshot();
+    for (speaker, name) in notetaker_core::voiceprint::recognize(&prints, &known) {
+        if snapshot.names.given().all(|(given, _)| given != speaker) {
+            notes.rename_speaker(speaker, &name);
+        }
+    }
+}
+
+/// The voiceprint of each numbered voice of the current meeting.
+fn voice_prints(notes: &MeetingNotes, audio_dir: &Path) -> Option<std::collections::BTreeMap<u32, Vec<f32>>> {
+    let embedder = notetaker_core::voiceprint::Resnet::load().ok()?;
+    let samples = notetaker_core::audio_file::read_samples(&system_recording(audio_dir)).ok()?;
+    let prints =
+        notetaker_core::voiceprint::speaker_prints(&embedder, &samples, &notes.transcript(), notetaker_core::audio::SAMPLE_RATE);
+    (!prints.is_empty()).then_some(prints)
 }
 
 /// Shrinks the finished recordings to FLAC. A failure leaves the WAV files in place and is reported.
@@ -439,11 +468,22 @@ fn compress_audio(app: &AppHandle, audio_dir: &Path) {
 /// Applies to the transcript labels and to the minutes of the current meeting.
 #[tauri::command]
 fn rename_speaker(speaker: u32, name: String, app: AppHandle, meeting: State<Meeting>) -> Result<(), String> {
-    let mom = meeting.notes()?.rename_speaker(speaker, &name);
+    let notes = meeting.notes()?;
+    let mom = notes.rename_speaker(speaker, &name);
     if !mom.is_empty() {
         emit_mom(&app, Ok(mom));
     }
     save_meeting(&app);
+    // The voice is remembered so that the next meeting names it by itself.
+    let audio_dir = meeting.state().audio_dir.clone();
+    let name = name.trim().to_owned();
+    if let (Some(audio_dir), false) = (audio_dir, name.is_empty()) {
+        std::thread::spawn(move || {
+            if let Some(print) = voice_prints(&notes, &audio_dir).and_then(|mut prints| prints.remove(&speaker)) {
+                let _ = app.state::<Db>().store().remember_voice(&name, &print);
+            }
+        });
+    }
     Ok(())
 }
 

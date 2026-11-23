@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     at_secs    REAL NOT NULL,
     label      TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS voiceprints (
+    name    TEXT PRIMARY KEY,
+    weight  INTEGER NOT NULL,
+    vector  BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chunks (
     meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
     start_secs REAL NOT NULL,
@@ -93,6 +98,42 @@ impl Store {
             }
         }
         Ok(Self(connection))
+    }
+
+    /// Every remembered voice: its name and voiceprint.
+    pub fn voiceprints(&self) -> Result<Vec<(String, Vec<f32>)>, StoreError> {
+        let mut select = self.0.prepare("SELECT name, vector FROM voiceprints ORDER BY name")?;
+        let prints = select
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, from_bytes(&row.get::<_, Vec<u8>>(1)?))))?
+            .collect::<Result<_, _>>()?;
+        Ok(prints)
+    }
+
+    /// Remembers the voice of `name`, mixing it into what is already stored for that name.
+    pub fn remember_voice(&self, name: &str, print: &[f32]) -> Result<(), StoreError> {
+        let stored = self
+            .0
+            .query_row("SELECT weight, vector FROM voiceprints WHERE name = ?1", [name], |row| {
+                Ok((row.get::<_, u32>(0)?, from_bytes(&row.get::<_, Vec<u8>>(1)?)))
+            })
+            .optional()?;
+        let (weight, vector) = match stored {
+            Some((weight, old)) if old.len() == print.len() => {
+                (weight.saturating_add(1).min(5), crate::voiceprint::merge(&old, weight, print))
+            }
+            _ => (1, print.to_vec()),
+        };
+        self.0.execute(
+            "INSERT INTO voiceprints (name, weight, vector) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET weight = ?2, vector = ?3",
+            params![name, weight, to_bytes(&vector)],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets a remembered voice. Returns whether it existed.
+    pub fn forget_voice(&self, name: &str) -> Result<bool, StoreError> {
+        Ok(self.0.execute("DELETE FROM voiceprints WHERE name = ?1", [name])? > 0)
     }
 
     /// Removes the meeting with everything stored for it. Returns whether it existed.

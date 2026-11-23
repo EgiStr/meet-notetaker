@@ -28,5 +28,6 @@ pub mod speakers;
 pub mod store;
 pub mod stt_settings;
 pub mod transcript;
+pub mod voiceprint;
 #[cfg(feature = "local-whisper")]
 pub mod whisper_transcriber;
