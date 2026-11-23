@@ -93,6 +93,7 @@ export const TEMPLATES = [
   { id: "sales", label: "Penjualan" },
   { id: "retro", label: "Retrospektif" },
   { id: "formal", label: "Formal (lengkap)" },
+  { id: "custom", label: "Buatan saya" },
 ] as const;
 
 export function setTemplate(template: string): Promise<void> {
@@ -153,6 +154,20 @@ export function reportHtml(): Promise<string> {
 /** Writes the stretch around a bookmark of the open meeting to `path` as one HTML file. */
 export function exportClip(index: number, path: string): Promise<void> {
   return invoke("export_clip", { index, path });
+}
+
+export interface CustomTemplate {
+  /** One heading per line. */
+  sections: string;
+  instructions: string;
+}
+
+export function getCustomTemplate(): Promise<CustomTemplate> {
+  return invoke("get_custom_template");
+}
+
+export function setCustomTemplate(form: CustomTemplate): Promise<void> {
+  return invoke("set_custom_template", { form });
 }
 
 export interface ActionItem {

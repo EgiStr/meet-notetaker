@@ -733,6 +733,45 @@ fn export_clip(index: usize, path: String, meeting: State<Meeting>, db: State<Db
 }
 
 const WEBHOOK_SETTING: &str = "webhook_url";
+const CUSTOM_TEMPLATE_SETTING: &str = "custom_template";
+
+/// Makes the saved custom template the one the prompts use. Called once at start-up.
+fn load_custom_template(store: &Store) {
+    let saved = store.setting(CUSTOM_TEMPLATE_SETTING).ok().flatten();
+    notetaker_core::prompts::set_custom_template(saved.and_then(|json| serde_json::from_str(&json).ok()));
+}
+
+/// The template the user wrote; empty before they wrote one. `sections` holds one heading per line.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CustomTemplateForm {
+    sections: String,
+    instructions: String,
+}
+
+#[tauri::command]
+fn get_custom_template() -> CustomTemplateForm {
+    let template = notetaker_core::prompts::custom_template().unwrap_or_default();
+    CustomTemplateForm { sections: template.sections.join("
+"), instructions: template.instructions }
+}
+
+/// Applies from the next update or rebuild of minutes written with the custom template.
+#[tauri::command]
+fn set_custom_template(form: CustomTemplateForm, db: State<Db>) -> Result<(), String> {
+    use notetaker_core::prompts::{set_custom_template, CustomTemplate};
+    let template = CustomTemplate {
+        sections: CustomTemplate::sections_from_text(&form.sections),
+        instructions: form.instructions.trim().to_owned(),
+    };
+    let json = if template == CustomTemplate::default() {
+        String::new()
+    } else {
+        serde_json::to_string(&template).map_err(|error| error.to_string())?
+    };
+    db.store().set_setting(CUSTOM_TEMPLATE_SETTING, &json).map_err(|error| error.to_string())?;
+    set_custom_template((!json.is_empty()).then_some(template));
+    Ok(())
+}
 
 /// Finds the action items of the current meeting and keeps them, replacing what was kept for it.
 /// With `send`, they also go to the webhook when one is set. A failure is reported and leaves
@@ -1157,7 +1196,9 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            app.manage(Db(Mutex::new(Store::open(&data_dir.join("meetings.db"))?)));
+            let store = Store::open(&data_dir.join("meetings.db"))?;
+            load_custom_template(&store);
+            app.manage(Db(Mutex::new(store)));
             index_in_background(app.handle());
             tray::setup(app)?;
             desktop::setup(app);
@@ -1197,6 +1238,8 @@ pub fn run() {
             export_meeting,
             report_html,
             talk_stats,
+            get_custom_template,
+            set_custom_template,
             extract_actions,
             send_actions,
             list_actions,

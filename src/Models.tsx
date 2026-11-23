@@ -1,5 +1,6 @@
 import { type FormEvent, useState } from "react";
 import { SttSection } from "./SttSettings";
+import { TemplateSection } from "./TemplateSection";
 import {
   type ModelsView,
   type Provider,
@@ -47,6 +48,7 @@ export function Models({ models, error, apply }: Props) {
         ))}
         <NewProvider apply={apply} />
         <SttSection />
+        <TemplateSection />
       </div>
     </main>
   );

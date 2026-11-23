@@ -18,6 +18,64 @@ pub enum MomTemplate {
     Retro,
     /// The full minutes document: summary, agenda discussion, decisions and action items in tables, risks, glossary.
     Formal,
+    /// The user's own template, see `set_custom_template`.
+    Custom,
+}
+
+/// A template the user wrote: the sections of the minutes and extra instructions for the writer.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CustomTemplate {
+    /// One heading per entry. With none, the minutes are free-form and `instructions` rule.
+    pub sections: Vec<String>,
+    pub instructions: String,
+}
+
+/// The template behind `MomTemplate::Custom`. It is global because the prompts are built far from
+/// where it is edited, and there is only one of it per user.
+static CUSTOM: std::sync::RwLock<Option<CustomTemplate>> = std::sync::RwLock::new(None);
+
+pub fn set_custom_template(template: Option<CustomTemplate>) {
+    *CUSTOM.write().unwrap_or_else(std::sync::PoisonError::into_inner) = template;
+}
+
+pub fn custom_template() -> Option<CustomTemplate> {
+    CUSTOM.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+impl CustomTemplate {
+    /// Splits text with one heading per line; blank lines and leading "#" or "-" are dropped.
+    pub fn sections_from_text(text: &str) -> Vec<String> {
+        text.lines()
+            .map(|line| line.trim().trim_start_matches(|c: char| matches!(c, '#' | '-' | '*') || c.is_whitespace()).trim())
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn system_prompt(&self) -> String {
+        let instructions = match self.instructions.trim() {
+            "" => String::new(),
+            text => format!("
+Petunjuk tambahan dari pengguna:
+{text}
+"),
+        };
+        if self.sections.is_empty() {
+            return format!(
+                "Anda notulis rapat. Tulis notulen (MoM) dalam bahasa Indonesia, berformat Markdown.{instructions}
+{MOM_RULES}"
+            );
+        }
+        let headings: String = self.sections.iter().map(|section| format!("## {section}
+")).collect();
+        format!(
+            "Anda notulis rapat. Tulis notulen (MoM) dalam bahasa Indonesia, berformat Markdown, dengan tepat {} bagian berikut dan urutan ini:
+
+{headings}{instructions}
+{MOM_RULES}",
+            self.sections.len()
+        )
+    }
 }
 
 impl MomTemplate {
@@ -29,6 +87,7 @@ impl MomTemplate {
             "sales" => Self::Sales,
             "retro" => Self::Retro,
             "formal" => Self::Formal,
+            "custom" => Self::Custom,
             _ => return None,
         })
     }
@@ -41,6 +100,7 @@ impl MomTemplate {
             Self::Sales => "sales",
             Self::Retro => "retro",
             Self::Formal => "formal",
+            Self::Custom => "custom",
         }
     }
 
@@ -51,11 +111,18 @@ impl MomTemplate {
             Self::OneOnOne => &["Ringkasan", "Kabar dan Masukan", "Tujuan dan Pengembangan", "Action Items"],
             Self::Sales => &["Ringkasan", "Kebutuhan Pelanggan", "Keberatan", "Langkah Berikutnya", "Action Items"],
             Self::Retro => &["Berjalan Baik", "Perlu Diperbaiki", "Pembelajaran", "Action Items"],
-            Self::Formal => &[],
+            Self::Formal | Self::Custom => &[],
         }
     }
 
     fn system_prompt(self) -> String {
+        if self == Self::Custom {
+            // Without a saved template the general one is the closest thing.
+            return match custom_template() {
+                Some(template) => template.system_prompt(),
+                None => Self::General.system_prompt(),
+            };
+        }
         if self == Self::Formal {
             return format!("{FORMAL_HEAD}
 {MOM_RULES}
@@ -359,6 +426,29 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_template_lists_its_sections_and_instructions() {
+        // One test owns the global template, so parallel tests cannot see it change.
+        assert_eq!(CustomTemplate::sections_from_text("## Latar
+- Keputusan
+
+  Risiko  "), ["Latar", "Keputusan", "Risiko"]);
+        set_custom_template(Some(CustomTemplate {
+            sections: vec!["Temuan".into(), "Tindakan".into()],
+            instructions: "Sebut nomor dokumen.".into(),
+        }));
+        let prompt = final_mom(MomTemplate::Custom, "", &[], &no_names());
+        set_custom_template(None);
+        assert!(prompt.system.contains("tepat 2 bagian"));
+        assert!(prompt.system.contains("## Temuan
+## Tindakan
+"));
+        assert!(prompt.system.contains("Sebut nomor dokumen."));
+        // Without a saved template the general sections are used.
+        let fallback = final_mom(MomTemplate::Custom, "", &[], &no_names());
+        assert!(fallback.system.contains("## Ringkasan"));
+    }
+
+    #[test]
     fn diarized_segments_carry_the_speaker_name() {
         let mut names = SpeakerNames::default();
         names.rename(2, "Budi");
@@ -485,6 +575,7 @@ mod tests {
                 MomTemplate::Sales,
                 MomTemplate::Retro,
                 MomTemplate::Formal,
+                MomTemplate::Custom,
             ]
         {
             assert_eq!(MomTemplate::from_id(template.id()), Some(template));
