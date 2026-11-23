@@ -30,11 +30,12 @@ impl Diarizer for PolyvoiceDiarizer {
             .map_err(failed)?;
 
         let result = pipeline.run(&samples, rate).map_err(failed)?;
-        Ok(result
+        let turns: Vec<SpeakerTurn> = result
             .turns
             .iter()
             .map(|turn| SpeakerTurn { start_secs: turn.time.start, end_secs: turn.time.end, speaker: turn.speaker.0 })
-            .collect())
+            .collect();
+        Ok(crate::speakers::merge_minor_voices(&turns))
     }
 }
 

@@ -24,6 +24,40 @@ pub trait Diarizer: Send + Sync {
     fn diarize(&self, recording: &Path) -> Result<Vec<SpeakerTurn>, DiarizeError>;
 }
 
+/// A voice that speaks less than this share of all speech (and less than `MINOR_MAX_SECS`) is
+/// almost always noise or the same person split in two, not a participant.
+const MINOR_SHARE: f64 = 0.03;
+const MINOR_MAX_SECS: f64 = 30.0;
+
+/// Gives the turns of minor voices to the nearest turn in time of a main voice, so a meeting
+/// shows a handful of speakers instead of a dozen. Nothing changes if every voice is minor.
+pub fn merge_minor_voices(turns: &[SpeakerTurn]) -> Vec<SpeakerTurn> {
+    let mut total: BTreeMap<u32, f64> = BTreeMap::new();
+    for turn in turns {
+        *total.entry(turn.speaker).or_default() += turn.end_secs - turn.start_secs;
+    }
+    let all: f64 = total.values().sum();
+    let is_minor = |voice: u32| {
+        let secs = total.get(&voice).copied().unwrap_or(0.0);
+        secs < MINOR_MAX_SECS && secs < all * MINOR_SHARE
+    };
+    let main: Vec<&SpeakerTurn> = turns.iter().filter(|turn| !is_minor(turn.speaker)).collect();
+    if main.is_empty() {
+        return turns.to_vec();
+    }
+    turns
+        .iter()
+        .map(|turn| {
+            if !is_minor(turn.speaker) {
+                return turn.clone();
+            }
+            let gap = |other: &&SpeakerTurn| (other.start_secs - turn.end_secs).max(turn.start_secs - other.end_secs).max(0.0);
+            let nearest = main.iter().min_by(|a, b| gap(a).total_cmp(&gap(b))).map_or(turn.speaker, |other| other.speaker);
+            SpeakerTurn { speaker: nearest, ..turn.clone() }
+        })
+        .collect()
+}
+
 /// Labels every system-audio segment with the voice that speaks for most of
 /// it. Voices are numbered from 1 in the order they are first heard. Segments
 /// that overlap no turn keep `None`.
@@ -140,6 +174,17 @@ mod tests {
         let turns = [turn(0.0, 4.5, 7), turn(4.5, 9.5, 3), turn(9.5, 15.0, 7)];
         assign_speakers(&mut segments, &turns);
         assert_eq!(speakers(&segments), [Some(1), Some(2), Some(1)]);
+    }
+
+    #[test]
+    fn short_lived_voices_join_the_nearest_main_voice() {
+        let turns = [turn(0.0, 100.0, 0), turn(100.0, 102.0, 5), turn(102.0, 200.0, 1), turn(300.0, 303.0, 6), turn(210.0, 250.0, 0)];
+        let merged: Vec<u32> = merge_minor_voices(&turns).iter().map(|t| t.speaker).collect();
+        // Voice 5 sits between 0 and 1 (tie: the first); voice 6 is closest to the turn ending at 250.
+        assert_eq!(merged, [0, 0, 1, 0, 0]);
+        // With only minor voices nothing is merged.
+        let only = [turn(0.0, 2.0, 3), turn(2.0, 4.0, 4)];
+        assert_eq!(merge_minor_voices(&only), only);
     }
 
     #[test]
