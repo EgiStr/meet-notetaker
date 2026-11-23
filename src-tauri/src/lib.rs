@@ -158,8 +158,14 @@ fn start_recording(
     notes.set_template(template);
     let started_at = unix_now()?;
     let audio_dir = new_audio_dir(&app, started_at)?;
-    let untitled = title.trim().is_empty();
-    let title = if untitled { DEFAULT_TITLE } else { title.trim() };
+    // A meeting without a title takes the name of the calendar entry that is on now.
+    let from_calendar = if title.trim().is_empty() { app.state::<Calendar>().current(started_at).filter(|event| !event.title.trim().is_empty()) } else { None };
+    let untitled = title.trim().is_empty() && from_calendar.is_none();
+    let title = match &from_calendar {
+        Some(event) => event.title.trim(),
+        _ if untitled => DEFAULT_TITLE,
+        _ => title.trim(),
+    };
     let meeting_id = db.store().create_meeting(title, started_at).map_err(|error| error.to_string())?;
 
     let sink: EventSink = {
@@ -734,6 +740,76 @@ fn export_clip(index: usize, path: String, meeting: State<Meeting>, db: State<Db
 
 const WEBHOOK_SETTING: &str = "webhook_url";
 const CUSTOM_TEMPLATE_SETTING: &str = "custom_template";
+const CALENDAR_SETTING: &str = "calendar_source";
+
+/// The entries of the calendar, read ahead so that starting a recording never waits for the network.
+#[derive(Default)]
+struct Calendar(Mutex<(Vec<notetaker_core::calendar::Event>, i64)>);
+
+impl Calendar {
+    /// The calendar entry that is on at `now`, if any.
+    fn current(&self, now: i64) -> Option<notetaker_core::calendar::Event> {
+        let cache = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        notetaker_core::calendar::current(&cache.0, now, cache.1)
+    }
+}
+
+/// Reads the calendar from `source` into the cache; returns how many entries it holds.
+fn load_calendar(app: &AppHandle, source: &str, utc_offset_secs: i64) -> Result<usize, String> {
+    let events = notetaker_core::calendar::parse(&notetaker_core::calendar::fetch(source)?, utc_offset_secs);
+    let count = events.len();
+    *app.state::<Calendar>().0.lock().unwrap_or_else(PoisonError::into_inner) = (events, utc_offset_secs);
+    Ok(count)
+}
+
+/// Reads the saved calendar again in the background; a failure only means no entry is found.
+#[tauri::command]
+fn refresh_calendar(utc_offset_secs: i64, app: AppHandle) {
+    std::thread::spawn(move || {
+        let source = app.state::<Db>().store().setting(CALENDAR_SETTING).ok().flatten();
+        if let Some(source) = source {
+            if let Err(error) = load_calendar(&app, &source, utc_offset_secs) {
+                eprintln!("kalender: {error}");
+            }
+        }
+    });
+}
+
+#[tauri::command]
+fn get_calendar(db: State<Db>) -> Result<String, String> {
+    db.store().setting(CALENDAR_SETTING).map(Option::unwrap_or_default).map_err(|error| error.to_string())
+}
+
+/// Saves the address (or file) of an .ics feed after reading it once; a blank one turns the
+/// calendar off. Returns how many entries the feed has.
+#[tauri::command]
+async fn set_calendar(source: String, utc_offset_secs: i64, app: AppHandle) -> Result<usize, String> {
+    spawn_blocking(move || {
+        let source = source.trim().to_owned();
+        let db = app.state::<Db>();
+        if source.is_empty() {
+            db.store().set_setting(CALENDAR_SETTING, "").map_err(|error| error.to_string())?;
+            *app.state::<Calendar>().0.lock().unwrap_or_else(PoisonError::into_inner) = Default::default();
+            return Ok(0);
+        }
+        let count = load_calendar(&app, &source, utc_offset_secs)?;
+        db.store().set_setting(CALENDAR_SETTING, &source).map_err(|error| error.to_string())?;
+        Ok(count)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The people invited to the calendar entry that was on when the open meeting started.
+#[tauri::command]
+fn calendar_attendees(meeting: State<Meeting>, db: State<Db>, calendar: State<Calendar>) -> Vec<String> {
+    let Some(id) = meeting.state().meeting_id else { return Vec::new() };
+    let started_at = match db.store().load(id) {
+        Ok(Some((summary, _))) => summary.started_at,
+        _ => return Vec::new(),
+    };
+    calendar.current(started_at).map(|event| event.attendees).unwrap_or_default()
+}
 
 /// Makes the saved custom template the one the prompts use. Called once at start-up.
 fn load_custom_template(store: &Store) {
@@ -1199,6 +1275,7 @@ pub fn run() {
             let store = Store::open(&data_dir.join("meetings.db"))?;
             load_custom_template(&store);
             app.manage(Db(Mutex::new(store)));
+            app.manage(Calendar::default());
             index_in_background(app.handle());
             tray::setup(app)?;
             desktop::setup(app);
@@ -1238,6 +1315,10 @@ pub fn run() {
             export_meeting,
             report_html,
             talk_stats,
+            refresh_calendar,
+            get_calendar,
+            set_calendar,
+            calendar_attendees,
             get_custom_template,
             set_custom_template,
             extract_actions,

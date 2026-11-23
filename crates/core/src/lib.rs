@@ -6,6 +6,7 @@ pub mod actions;
 pub mod analytics;
 pub mod audio;
 pub mod capture;
+pub mod calendar;
 pub mod chunker;
 pub mod clip;
 pub mod cleanup;

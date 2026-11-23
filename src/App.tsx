@@ -12,7 +12,9 @@ import { notifyAway, quitApp, useAutostart, useMeetingDetected, useShowSummary, 
 import {
   TEMPLATES,
   catchUp,
+  calendarAttendees,
   exportClip,
+  refreshCalendar,
   exportMeeting,
   relabelSpeakers,
   reportHtml,
@@ -98,6 +100,12 @@ export function App() {
   const [glossary, setGlossary] = useState("");
   /** The saved audio of this meeting, by stream, so a transcript line can be played. */
   const [audioFiles, setAudioFiles] = useState<Record<string, string>>({});
+  // The calendar is read ahead, so that starting a recording finds the entry that is on.
+  useEffect(() => {
+    void refreshCalendar();
+    const timer = setInterval(() => void refreshCalendar(), 30 * 60_000);
+    return () => clearInterval(timer);
+  }, []);
   useEffect(() => {
     if (status === "recording" || status === "stopping" || status === "importing") return;
     invoke<Record<string, string>>("recording_files").then(setAudioFiles, () => setAudioFiles({}));
@@ -1023,6 +1031,10 @@ function SpeakerNamesForm({
   onRename,
 }: Omit<TranscriptProps, "status" | "highlight" | "onBookmark" | "onEdit" | "audioFiles" | "onStart" | "onImport">) {
   const speakers = [...new Set(segments.flatMap((segment) => segment.speaker ?? []))].sort((a, b) => a - b);
+  const [invited, setInvited] = useState<string[]>([]);
+  useEffect(() => {
+    calendarAttendees().then(setInvited, () => setInvited([]));
+  }, []);
   if (speakers.length === 0) return null;
 
   return (
@@ -1034,6 +1046,7 @@ function SpeakerNamesForm({
           aria-label={`Nama untuk Pembicara ${speaker}`}
           defaultValue={names[speaker] ?? ""}
           placeholder={`Pembicara ${speaker}`}
+          list="invited-people"
           onBlur={(event) => {
             if (event.target.value.trim() !== (names[speaker] ?? "")) onRename(speaker, event.target.value);
           }}
@@ -1043,6 +1056,11 @@ function SpeakerNamesForm({
           className="w-36 rounded-md border border-zinc-300 px-2 py-1 outline-none focus:border-zinc-500"
         />
       ))}
+      <datalist id="invited-people">
+        {invited.map((person) => (
+          <option key={person} value={person} />
+        ))}
+      </datalist>
     </fieldset>
   );
 }

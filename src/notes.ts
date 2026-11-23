@@ -156,6 +156,27 @@ export function exportClip(index: number, path: string): Promise<void> {
   return invoke("export_clip", { index, path });
 }
 
+const utcOffsetSecs = () => -new Date().getTimezoneOffset() * 60;
+
+export function getCalendar(): Promise<string> {
+  return invoke("get_calendar");
+}
+
+/** Saves the calendar feed after reading it; returns how many entries it has. A blank address turns it off. */
+export function setCalendar(source: string): Promise<number> {
+  return invoke("set_calendar", { source, utcOffsetSecs: utcOffsetSecs() });
+}
+
+/** Reads the saved calendar again, so that the next recording finds the entry that is on. */
+export function refreshCalendar(): Promise<void> {
+  return invoke("refresh_calendar", { utcOffsetSecs: utcOffsetSecs() });
+}
+
+/** The people invited to the calendar entry that was on when the open meeting started. */
+export function calendarAttendees(): Promise<string[]> {
+  return invoke("calendar_attendees");
+}
+
 export interface CustomTemplate {
   /** One heading per line. */
   sections: string;
