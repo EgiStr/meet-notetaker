@@ -28,6 +28,7 @@ use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod models;
+mod stt;
 mod desktop;
 mod tray;
 
@@ -831,9 +832,31 @@ fn transcriber_from_env(app: &AppHandle) -> Result<Arc<dyn Transcriber>, String>
     build_transcriber(app, false)
 }
 
+const NO_STT: &str = "Transkripsi belum diatur. Buka Model → Transkripsi, pilih penyedia dan isi kunci API.";
+
 /// `final_pass`: the slower, more accurate model used over a finished recording.
 fn build_transcriber(app: &AppHandle, final_pass: bool) -> Result<Arc<dyn Transcriber>, String> {
     let language = spoken_language(app);
+    // What was chosen in the app wins over the environment.
+    if let Some((settings, api_key)) = stt::chosen(app)? {
+        let transcriber: Arc<dyn Transcriber> = if settings.provider == "deepgram" {
+            Arc::new(
+                DeepgramTranscriber::new(DeepgramSettings { api_key, model: settings.model.clone(), language })
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            Arc::new(
+                OpenAiTranscriber::new(OpenAiSettings {
+                    base_url: settings.base_url.clone(),
+                    api_key,
+                    model: settings.model_for(final_pass).to_owned(),
+                    language,
+                })
+                .map_err(|error| error.to_string())?,
+            )
+        };
+        return Ok(Arc::new(CleaningTranscriber::new(transcriber, &glossary(app))));
+    }
     let provider = env_or("STT_PROVIDER", "openai");
     let transcriber: Arc<dyn Transcriber> = match provider.as_str() {
         "openai" => {
@@ -848,13 +871,13 @@ fn build_transcriber(app: &AppHandle, final_pass: bool) -> Result<Arc<dyn Transc
                 _ => live_model,
             };
             Arc::new(
-                OpenAiTranscriber::new(OpenAiSettings { base_url, api_key: required_env("STT_API_KEY")?, model, language })
+                OpenAiTranscriber::new(OpenAiSettings { base_url, api_key: required_env("STT_API_KEY").map_err(|_| NO_STT.to_owned())?, model, language })
                     .map_err(|error| error.to_string())?,
             )
         }
         "deepgram" => Arc::new(
             DeepgramTranscriber::new(DeepgramSettings {
-                api_key: required_env("DEEPGRAM_API_KEY")?,
+                api_key: required_env("DEEPGRAM_API_KEY").map_err(|_| NO_STT.to_owned())?,
                 model: env_or("STT_MODEL", "nova-2"),
                 language,
             })
@@ -991,6 +1014,10 @@ pub fn run() {
             relabel_speakers,
             delete_meeting,
             models::get_models,
+            stt::get_stt,
+            stt::save_stt,
+            stt::reset_stt,
+            stt::test_stt,
             models::save_provider,
             models::remove_provider,
             models::add_model,

@@ -13,6 +13,7 @@ Dibangun dengan Rust (Tauri 2) dan React. Desain lengkap ada di [docs/PRD.md](do
 - Catatan pribadi yang bisa diperluas AI, pertanyaan yang disarankan, tanya jawab saat rapat.
 - Label pembicara otomatis (diarization): mikrofon = "Saya", suara lain di rapat = Pembicara 1, 2, 3 …; namanya bisa diubah. Suara yang hanya bicara sebentar digabung ke pembicara terdekat agar jumlahnya masuk akal. Rekaman lebih dari satu jam (rapat panjang) kini juga dipisah suaranya dan ditranskrip ulang.
 - Template MoM "Formal (lengkap)": Executive Summary, Agenda dan Pembahasan, Keputusan (tabel), Action Items (tabel PIC dan waktu), Risiko, Rekomendasi, Glosarium, Keterbatasan Transkrip. Menu ⋯ → Ekspor MoM sebagai PDF (lewat dialog cetak → "Save as PDF") atau HTML; Ekspor transkrip / data mentah menyimpan .txt atau .json.
+- Layanan transkripsi (Groq, OpenAI, server kompatibel, atau Deepgram) diatur di layar Model → Transkripsi; kunci API disimpan di Windows Credential Manager. Tanpa itu, variabel `STT_*` masih berlaku. Aplikasi hasil installer jadi bisa mentranskripsi tanpa variabel lingkungan.
 - Riwayat rapat (SQLite), pencarian, tanya ke semua rapat, penanda, ekspor Markdown, hapus.
 - Impor rekaman audio yang sudah ada.
 - Pintasan global Ctrl+Alt+R untuk mulai/berhenti merekam, notifikasi Windows saat nama Anda disebut, pengingat (atau rekam otomatis, bila diaktifkan di menu ⋯) saat rapat Google Meet, Zoom, atau Teams terbuka, dan notifikasi ringkasan setelah rapat selesai.

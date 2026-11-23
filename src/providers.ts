@@ -47,3 +47,22 @@ export function useModels() {
 
   return { models, error, apply };
 }
+
+export interface SttSettings {
+  provider: "openai" | "deepgram";
+  base_url: string;
+  model: string;
+  final_model: string;
+}
+
+export interface SttView {
+  settings: SttSettings;
+  has_key: boolean;
+  /** Nothing is stored; the STT_* environment variables decide (or transcription is not set up). */
+  env_fallback: boolean;
+}
+
+export const getStt = () => invoke<SttView>("get_stt");
+export const saveStt = (settings: SttSettings, apiKey: string) => invoke<SttView>("save_stt", { settings, apiKey });
+export const resetStt = () => invoke<SttView>("reset_stt");
+export const testStt = () => invoke<string>("test_stt");

@@ -1,4 +1,5 @@
 import { type FormEvent, useState } from "react";
+import { SttSection } from "./SttSettings";
 import {
   type ModelsView,
   type Provider,
@@ -45,6 +46,7 @@ export function Models({ models, error, apply }: Props) {
           <ProviderCard key={provider.id} provider={provider} active={models.active} apply={apply} />
         ))}
         <NewProvider apply={apply} />
+        <SttSection />
       </div>
     </main>
   );
