@@ -1,6 +1,7 @@
 import { type FormEvent, useState } from "react";
 import { SttSection } from "./SttSettings";
 import { CalendarSection } from "./CalendarSection";
+import { VoicesSection } from "./VoicesSection";
 import { TemplateSection } from "./TemplateSection";
 import {
   type ModelsView,
@@ -51,6 +52,7 @@ export function Models({ models, error, apply }: Props) {
         <SttSection />
         <TemplateSection />
         <CalendarSection />
+        <VoicesSection />
       </div>
     </main>
   );

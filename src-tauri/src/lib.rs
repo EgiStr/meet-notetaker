@@ -930,6 +930,17 @@ fn set_action_done(id: i64, done: bool, db: State<Db>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn list_voices(db: State<Db>) -> Result<Vec<String>, String> {
+    let prints = db.store().voiceprints().map_err(|error| error.to_string())?;
+    Ok(prints.into_iter().map(|(name, _)| name).collect())
+}
+
+#[tauri::command]
+fn forget_voice(name: String, db: State<Db>) -> Result<(), String> {
+    db.store().forget_voice(&name).map(|_| ()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn get_webhook(db: State<Db>) -> Result<String, String> {
     db.store().setting(WEBHOOK_SETTING).map(Option::unwrap_or_default).map_err(|error| error.to_string())
 }
@@ -1330,6 +1341,8 @@ pub fn run() {
             send_actions,
             list_actions,
             set_action_done,
+            list_voices,
+            forget_voice,
             get_webhook,
             set_webhook,
             export_clip,

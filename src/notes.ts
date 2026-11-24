@@ -219,6 +219,14 @@ export function sendActions(): Promise<void> {
   return invoke("send_actions");
 }
 
+export function listVoices(): Promise<string[]> {
+  return invoke("list_voices");
+}
+
+export function forgetVoice(name: string): Promise<void> {
+  return invoke("forget_voice", { name });
+}
+
 export function getWebhook(): Promise<string> {
   return invoke("get_webhook");
 }
