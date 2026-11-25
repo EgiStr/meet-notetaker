@@ -25,6 +25,7 @@ pub mod audio_file;
 pub mod polyvoice_diarizer;
 pub mod report;
 pub mod prompts;
+pub mod retry;
 pub mod providers;
 pub mod semantic;
 pub mod session;

@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::llm::{LlmClient, LlmError, Prompt};
+use crate::retry::{is_transient_status, with_retries, PATIENT_DELAYS};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Routers list hundreds of models, which can take a while.
@@ -29,7 +30,7 @@ pub struct OpenAiLlm {
 
 impl OpenAiLlm {
     pub fn new(settings: OpenAiLlmSettings) -> Result<Self, LlmError> {
-        let client = Client::builder().timeout(REQUEST_TIMEOUT).build()?;
+        let client = Client::builder().timeout(REQUEST_TIMEOUT).pool_idle_timeout(Duration::from_secs(10)).build()?;
         Ok(Self { client, settings })
     }
 }
@@ -45,19 +46,30 @@ impl LlmClient for OpenAiLlm {
             ],
         });
 
-        let response = self
-            .client
-            .post(format!("{}/chat/completions", self.settings.base_url))
-            .bearer_auth(&self.settings.api_key)
-            .json(&request)
-            .send()?;
+        // A provider that is busy, or a connection that drops, usually works a moment later.
+        with_retries(PATIENT_DELAYS, is_transient, || {
+            let response = self
+                .client
+                .post(format!("{}/chat/completions", self.settings.base_url))
+                .bearer_auth(&self.settings.api_key)
+                .json(&request)
+                .send()?;
 
-        let status = response.status();
-        let body = response.text()?;
-        if !status.is_success() {
-            return Err(LlmError::Rejected { status: status.as_u16(), body: error_message(&body) });
-        }
-        parse_completion(&body)
+            let status = response.status();
+            let body = response.text()?;
+            if !status.is_success() {
+                return Err(LlmError::Rejected { status: status.as_u16(), body: error_message(&body) });
+            }
+            parse_completion(&body)
+        })
+    }
+}
+
+fn is_transient(error: &LlmError) -> bool {
+    match error {
+        LlmError::Http(_) | LlmError::Malformed(_) | LlmError::Empty => true,
+        LlmError::Rejected { status, .. } => is_transient_status(*status),
+        LlmError::NotConfigured(_) => false,
     }
 }
 
@@ -102,7 +114,9 @@ struct Response {
 
 #[derive(Deserialize)]
 struct Choice {
-    message: Message,
+    /// Absent when the model stopped before writing anything (its token limit, a content filter).
+    #[serde(default)]
+    message: Option<Message>,
 }
 
 #[derive(Deserialize)]
@@ -119,7 +133,7 @@ fn parse_completion(body: &str) -> Result<String, LlmError> {
     response
         .choices
         .into_iter()
-        .find_map(|choice| choice.message.content)
+        .find_map(|choice| choice.message?.content)
         .map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())
         .ok_or(LlmError::Empty)
@@ -182,11 +196,77 @@ mod tests {
     }
 
     #[test]
+    fn a_choice_without_a_message_is_empty_not_malformed() {
+        let body = r#"{"choices":[{"index":0,"finish_reason":"length"}]}"#;
+        assert!(matches!(parse_completion(body), Err(LlmError::Empty)));
+    }
+
+    #[test]
+    fn the_next_choice_is_used_when_the_first_has_no_message() {
+        let body = r#"{"choices":[{"finish_reason":"length"},{"message":{"content":"halo"}}]}"#;
+        assert_eq!(parse_completion(body).unwrap(), "halo");
+    }
+
+    #[test]
+    fn only_passing_trouble_is_retried() {
+        assert!(is_transient(&LlmError::Empty));
+        assert!(is_transient(&LlmError::Rejected { status: 503, body: String::new() }));
+        assert!(!is_transient(&LlmError::Rejected { status: 401, body: String::new() }));
+        assert!(!is_transient(&LlmError::NotConfigured(String::new())));
+    }
+
+    #[test]
     fn null_or_blank_content_is_empty() {
         let null = r#"{"choices":[{"message":{"content":null}}]}"#;
         let blank = r#"{"choices":[{"message":{"content":"  "}}]}"#;
         assert!(matches!(parse_completion(null), Err(LlmError::Empty)));
         assert!(matches!(parse_completion(blank), Err(LlmError::Empty)));
+    }
+
+    /// Serves the given raw HTTP responses, one per connection, and returns the base URL.
+    fn serve(responses: Vec<String>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 8192];
+                let _ = stream.read(&mut buffer);
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn http(status: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    fn llm_at(base_url: String) -> OpenAiLlm {
+        OpenAiLlm::new(OpenAiLlmSettings { base_url, api_key: "k".into(), model: "m".into() }).unwrap()
+    }
+
+    fn prompt() -> Prompt {
+        Prompt { system: "s".into(), user: "u".into() }
+    }
+
+    #[test]
+    fn a_busy_provider_is_asked_again() {
+        let ok = r#"{"choices":[{"message":{"content":"halo"}}]}"#;
+        let base = serve(vec![
+            http("503 Service Unavailable", r#"{"error":{"message":"busy"}}"#),
+            http("200 OK", r#"{"choices":[{"finish_reason":"length"}]}"#),
+            http("200 OK", ok),
+        ]);
+        assert_eq!(llm_at(base).complete(&prompt()).unwrap(), "halo");
+    }
+
+    #[test]
+    fn a_rejected_key_is_reported_at_once() {
+        let base = serve(vec![http("401 Unauthorized", r#"{"error":{"message":"Invalid API key"}}"#)]);
+        let error = llm_at(base).complete(&prompt()).unwrap_err();
+        assert!(matches!(error, LlmError::Rejected { status: 401, .. }), "{error}");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
 
 use crate::audio::encode_wav;
+use crate::retry::{is_transient_status, with_retries, LIVE_DELAYS};
 use crate::transcript::{AudioChunk, TranscribeError, Transcriber, TranscriptSegment};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -27,7 +28,7 @@ pub struct OpenAiTranscriber {
 
 impl OpenAiTranscriber {
     pub fn new(settings: OpenAiSettings) -> Result<Self, TranscribeError> {
-        let client = Client::builder().timeout(REQUEST_TIMEOUT).build()?;
+        let client = Client::builder().timeout(REQUEST_TIMEOUT).pool_idle_timeout(Duration::from_secs(10)).build()?;
         Ok(Self { client, settings })
     }
 }
@@ -38,29 +39,39 @@ impl Transcriber for OpenAiTranscriber {
     }
 
     fn transcribe_with_prompt(&self, chunk: &AudioChunk, prompt: &str) -> Result<Vec<TranscriptSegment>, TranscribeError> {
-        let audio = multipart::Part::bytes(encode_wav(&chunk.samples)?)
-            .file_name("chunk.wav")
-            .mime_str("audio/wav")?;
-        let form = multipart::Form::new()
-            .text("model", self.settings.model.clone())
-            .text("language", self.settings.language.clone())
-            .text("response_format", "verbose_json")
-            .part("file", audio);
-        let form = if prompt.is_empty() { form } else { form.text("prompt", prompt.to_owned()) };
+        let wav = encode_wav(&chunk.samples)?;
+        // The upload is sometimes cut off or refused for a moment; sending the same chunk again works.
+        with_retries(LIVE_DELAYS, is_transient, || {
+            let audio = multipart::Part::bytes(wav.clone()).file_name("chunk.wav").mime_str("audio/wav")?;
+            let form = multipart::Form::new()
+                .text("model", self.settings.model.clone())
+                .text("language", self.settings.language.clone())
+                .text("response_format", "verbose_json")
+                .part("file", audio);
+            let form = if prompt.is_empty() { form } else { form.text("prompt", prompt.to_owned()) };
 
-        let response = self
-            .client
-            .post(format!("{}/audio/transcriptions", self.settings.base_url))
-            .bearer_auth(&self.settings.api_key)
-            .multipart(form)
-            .send()?;
+            let response = self
+                .client
+                .post(format!("{}/audio/transcriptions", self.settings.base_url))
+                .bearer_auth(&self.settings.api_key)
+                .multipart(form)
+                .send()?;
 
-        let status = response.status();
-        let body = response.text()?;
-        if !status.is_success() {
-            return Err(TranscribeError::Rejected { status: status.as_u16(), body });
-        }
-        parse_segments(&body, chunk)
+            let status = response.status();
+            let body = response.text()?;
+            if !status.is_success() {
+                return Err(TranscribeError::Rejected { status: status.as_u16(), body });
+            }
+            parse_segments(&body, chunk)
+        })
+    }
+}
+
+fn is_transient(error: &TranscribeError) -> bool {
+    match error {
+        TranscribeError::Http(_) | TranscribeError::Malformed(_) => true,
+        TranscribeError::Rejected { status, .. } => is_transient_status(*status),
+        TranscribeError::Encode(_) | TranscribeError::Local(_) => false,
     }
 }
 
